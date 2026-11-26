@@ -175,7 +175,7 @@ func decideArmed(in Input) Decision {
 
 	if !in.RolloutStartedAt.IsZero() && !in.RolloutStartedAt.Before(change.At.Time.Add(-rolloutSlack)) {
 		d.Mode = v1alpha1.ModeWatch
-		d.ModeReason = "a rollout started within 30s of the flag change, so the deploy may be the cause"
+		d.ModeReason = "the workload rolled out from 30s before the flag change onward, so the deploy may be the cause"
 		d.Why += fmt.Sprintf("; a rollout also started at %s, so the deploy may be the cause and the flag is left on",
 			in.RolloutStartedAt.UTC().Format(time.TimeOnly))
 	}

@@ -166,7 +166,7 @@ func main() {
 func webhookServer(addr, secret string, store *changes.Store, r *controller.FlagGuardReconciler) manager.Runnable {
 	return anyReplica(func(ctx context.Context) error {
 		mux := http.NewServeMux()
-		mux.Handle("/webhooks/flagsmith", changes.Handler(secret, store, func(environment, feature string) {
+		mux.Handle("/webhooks/flagsmith", changes.Handler(secret, store, func(environment, feature int64) {
 			r.FlagChanged(ctx, environment, feature)
 		}))
 		srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second,

@@ -88,7 +88,7 @@ func TestRolloutAtTheSameTimeOnlyReports(t *testing.T) {
 	if d.Action != Trip || d.Mode != v1alpha1.ModeWatch {
 		t.Fatalf("got %+v, want Trip in watch mode", d)
 	}
-	if !strings.Contains(d.Why, "the deploy may be the cause") || !strings.Contains(d.ModeReason, "rollout") {
+	if !strings.Contains(d.Why, "the deploy may be the cause") || !strings.Contains(d.ModeReason, "rolled out") {
 		t.Fatalf("Why = %q, ModeReason = %q", d.Why, d.ModeReason)
 	}
 }

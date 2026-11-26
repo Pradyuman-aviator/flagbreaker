@@ -138,7 +138,7 @@ func TestAGapBetweenChecksStillBlamesTheChange(t *testing.T) {
 	w := newWorld(t, v1alpha1.ModeAct)
 	w.at(0)
 	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
-	w.r.Changes.Record("Production", "new_pricing", changes.Change{At: t0.Add(5 * time.Second), Enabled: true, ChangedBy: "admin@example.com"})
+	w.r.Changes.Record(envID, featureID, changes.Change{At: t0.Add(5 * time.Second), Enabled: true, ChangedBy: "admin@example.com"})
 	w.crashPods(t0.Add(80 * time.Second))
 	// The next check comes two minutes later (Flagsmith was unreachable).
 	g := w.at(120 * time.Second)
@@ -165,7 +165,7 @@ func TestAChangeMadeWhileFlagbreakerWasDownIsNotBlamedOnAGuess(t *testing.T) {
 	}
 	// The webhook, sent a few seconds after the change, says exactly when:
 	// before the crash. Now the change can be blamed.
-	w.r.Changes.Record("Production", "new_pricing", changes.Change{At: t0.Add(time.Hour + 35*time.Second), Enabled: true, ChangedBy: "admin@example.com"})
+	w.r.Changes.Record(envID, featureID, changes.Change{At: t0.Add(time.Hour + 35*time.Second), Enabled: true, ChangedBy: "admin@example.com"})
 	g = w.at(time.Hour + 45*time.Second)
 	if g.Status.Phase != v1alpha1.PhaseTripped || g.Status.Trigger.ChangedBy != "admin@example.com" {
 		t.Fatalf("with the webhook's time the change should be blamed: %+v", g.Status)
@@ -179,7 +179,7 @@ func TestACrashBeforeAChangeOfUnknownTimeIsNotBlamedOnIt(t *testing.T) {
 	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
 	w.crashPods(t0.Add(time.Hour + 30*time.Second)) // before the change at 1:00:35
 	w.at(time.Hour + 40*time.Second)
-	w.r.Changes.Record("Production", "new_pricing", changes.Change{At: t0.Add(time.Hour + 35*time.Second), Enabled: true, ChangedBy: "admin@example.com"})
+	w.r.Changes.Record(envID, featureID, changes.Change{At: t0.Add(time.Hour + 35*time.Second), Enabled: true, ChangedBy: "admin@example.com"})
 	if g := w.at(time.Hour + 45*time.Second); g.Status.Phase != v1alpha1.PhaseArmed || !g.Status.LastFlagChange.WorkloadWasFailing {
 		t.Fatalf("the workload was failing before the change; want Armed, got %+v", g.Status)
 	}

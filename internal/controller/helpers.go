@@ -221,6 +221,14 @@ func union(a, b []int64) []int64 {
 	return out
 }
 
+// wasFailing reports whether the workload was already failing at t: a crash
+// or a not-ready spell from `since` on, or a pod still crash-looping (or not
+// ready) from a problem that began before t. Restarts in a crash loop can be
+// minutes apart, so the last crash alone can look older than it is.
+func wasFailing(a workload.Assessment, t, since time.Time) bool {
+	return len(a.FailingBetween(since, t)) > 0 || len(a.BrokenBefore(t)) > 0
+}
+
 // lookback is how far before a change Flagbreaker looks to decide whether
 // the workload was failing already: Kubernetes keeps a container's last
 // crash long after it recovers, so not far.
