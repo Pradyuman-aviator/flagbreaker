@@ -66,6 +66,12 @@ type Input struct {
 	FlagEnabled bool
 	// LastChange is the latest change to the flag that Flagbreaker saw.
 	LastChange *v1alpha1.FlagChange
+	// ValueIncident is true when the current incident was caused by a change
+	// to the flag's value rather than by switching it on.
+	ValueIncident bool
+	// NewValueServed, for a value incident, is true while the flag still
+	// serves the value that caused it.
+	NewValueServed bool
 
 	Pods            workload.Assessment
 	DesiredReplicas int32
@@ -123,6 +129,11 @@ func Decide(in Input) Decision {
 		return decideTripped(in)
 	case v1alpha1.PhaseRecovered:
 		switch {
+		case in.ValueIncident && in.FlagDisabledAt == nil:
+			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the new value still in place, so Flagbreaker is watching the flag again"}
+		case in.ValueIncident:
+			// The flag stayed on, with a value that works: nothing to wait for.
+			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the value changed back, so Flagbreaker is watching the flag again"}
 		case in.FlagEnabled && in.FlagDisabledAt == nil:
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the flag still on, so Flagbreaker is watching it again"}
 		case in.FlagEnabled:
@@ -134,24 +145,30 @@ func Decide(in Input) Decision {
 	}
 }
 
-// decideArmed trips in two cases. Pods: the flag was just switched on, the
-// workload was fine before that, and enough pods failed after it. Alert:
-// another Feature Health provider marked the flag unhealthy while it is on.
+// decideArmed trips in two cases. Pods: the flag was just switched on, or
+// given a new value, the workload was fine before that, and enough pods
+// failed after it. Alert: another Feature Health provider marked the flag
+// unhealthy while it is on.
 func decideArmed(in Input) Decision {
 	d := Decision{Mode: in.Mode}
-	if !in.FlagEnabled {
+	change := in.LastChange
+	// Remote config values are read whether or not the flag is on, so a new
+	// value counts either way.
+	newValue := change != nil && change.ValueChanged
+	if !in.FlagEnabled && !newValue {
 		return d // nothing is on, so nothing to switch off or blame
 	}
-	if a := newestNewAlert(in.Alerts, in.HandledEventID, in.AlertsSince); a != nil {
-		d.Action, d.Cause, d.Alert = Trip, CauseAlert, a
-		d.Why = fmt.Sprintf("%s reported %q in Flagsmith Feature Health at %s UTC", a.Provider, a.Title, a.At.UTC().Format(time.TimeOnly))
-		return d
+	if in.FlagEnabled {
+		if a := newestNewAlert(in.Alerts, in.HandledEventID, in.AlertsSince); a != nil {
+			d.Action, d.Cause, d.Alert = Trip, CauseAlert, a
+			d.Why = fmt.Sprintf("%s reported %q in Flagsmith Feature Health at %s UTC", a.Provider, a.Title, a.At.UTC().Format(time.TimeOnly))
+			return d
+		}
 	}
 
-	change := in.LastChange
 	switch {
-	case change == nil, !change.Enabled:
-		return d // nothing switched on
+	case change == nil, !change.Enabled && !change.ValueChanged:
+		return d // nothing switched on, and no new value
 	case in.Now.Sub(change.At.Time) > in.Window:
 		return d // the change is too old to blame
 	case change.WorkloadWasFailing:
@@ -190,12 +207,26 @@ func decideTripped(in Input) Decision {
 		return Decision{Action: Rearm, Mode: in.Mode, Acknowledge: true,
 			Why: "a person dismissed the incident in Flagsmith, so Flagbreaker is watching the flag again and won't blame this change again"}
 	}
-	if in.FlagEnabled {
+	// What caused the incident is still served: the flag is on, or, for a
+	// value incident, it still has the new value.
+	active := in.FlagEnabled
+	if in.ValueIncident {
+		active = in.NewValueServed
+	}
+	if active {
 		if in.FlagDisabledAt != nil {
-			return Decision{Action: Rearm, Mode: in.Mode, Why: "a person turned the flag back on, so Flagbreaker is watching it again"}
+			why := "a person turned the flag back on, so Flagbreaker is watching it again"
+			if in.ValueIncident {
+				why = "a person set the new value again, so Flagbreaker is watching the flag again"
+			}
+			return Decision{Action: Rearm, Mode: in.Mode, Why: why}
 		}
 		if in.Mode == v1alpha1.ModeAct {
-			return Decision{Action: SwitchOff, Mode: in.Mode, Why: "retrying the switch-off"}
+			why := "retrying the switch-off"
+			if in.ValueIncident {
+				why = "retrying putting the previous value back"
+			}
+			return Decision{Action: SwitchOff, Mode: in.Mode, Why: why}
 		}
 		// Watch mode: the flag stays on until a person acts. If the pods heal
 		// anyway, that still counts as recovered.
@@ -236,6 +267,9 @@ func newestNewAlert(alerts []Alert, handled int64, since time.Time) *Alert {
 
 func describeChange(c *v1alpha1.FlagChange) string {
 	s := "the flag was switched on"
+	if c.ValueChanged {
+		s = "the flag's value was changed"
+	}
 	if c.ChangedBy != "" {
 		s += " by " + c.ChangedBy
 	}

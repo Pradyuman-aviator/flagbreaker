@@ -234,3 +234,71 @@ func TestRearmsWhenAPersonTurnsTheFlagBackOn(t *testing.T) {
 		t.Fatalf("recovered: got %+v, want Rearm", d)
 	}
 }
+
+func valueChanged(at time.Time) *v1alpha1.FlagChange {
+	return &v1alpha1.FlagChange{At: metav1.NewTime(at), Enabled: true, ValueChanged: true, ChangedBy: "admin@example.com",
+		Value: &v1alpha1.FlagValue{Type: "string", Value: "bad"}, PreviousValue: &v1alpha1.FlagValue{Type: "string", Value: "good"}}
+}
+
+func TestTripsWhenPodsFailAfterTheValueChanges(t *testing.T) {
+	d := Decide(armed(t0.Add(20*time.Second), valueChanged(t0), failing(2, 0, t0.Add(3*time.Second))))
+	if d.Action != Trip || d.Cause != CausePods {
+		t.Fatalf("got %+v, want Trip", d)
+	}
+	if !strings.Contains(d.Why, "after the flag's value was changed by admin@example.com") {
+		t.Fatalf("Why = %q", d.Why)
+	}
+}
+
+func TestANewValueCountsEvenWhileTheFlagIsOff(t *testing.T) {
+	// Remote config is read whether or not the flag is on.
+	in := armed(t0.Add(20*time.Second), valueChanged(t0), failing(2, 0, t0.Add(3*time.Second)))
+	in.FlagEnabled = false
+	in.LastChange.Enabled = false
+	if d := Decide(in); d.Action != Trip {
+		t.Fatalf("got %+v, want Trip", d)
+	}
+}
+
+func valueTripped(now time.Time, pods workload.Assessment) Input {
+	in := armed(now, valueChanged(t0), pods)
+	in.Phase, in.ValueIncident = v1alpha1.PhaseTripped, true
+	return in
+}
+
+func TestAValueIncidentRetriesPuttingTheValueBack(t *testing.T) {
+	in := valueTripped(t0.Add(30*time.Second), failing(2, 0, t0.Add(3*time.Second)))
+	in.NewValueServed = true
+	if d := Decide(in); d.Action != SwitchOff || !strings.Contains(d.Why, "previous value") {
+		t.Fatalf("got %+v, want a retry of putting the value back", d)
+	}
+}
+
+func TestAValueIncidentDoesNotWaitForTheFlagToBeSwitchedOff(t *testing.T) {
+	// The value was put back and the flag stays on: recovery depends only on
+	// the pods.
+	at := t0.Add(10 * time.Second)
+	in := valueTripped(t0.Add(45*time.Second), workload.Assessment{Pods: 2, Ready: 2})
+	in.FlagDisabledAt, in.HealthySince = &at, &at
+	if d := Decide(in); d.Action != Recover {
+		t.Fatalf("got %+v, want Recover", d)
+	}
+}
+
+func TestSettingTheBadValueAgainRearms(t *testing.T) {
+	at := t0.Add(10 * time.Second)
+	in := valueTripped(t0.Add(20*time.Second), failing(2, 0, t0.Add(3*time.Second)))
+	in.FlagDisabledAt, in.NewValueServed = &at, true
+	if d := Decide(in); d.Action != Rearm || !strings.Contains(d.Why, "set the new value again") {
+		t.Fatalf("got %+v, want Rearm", d)
+	}
+}
+
+func TestAValueIncidentRearmsRightAfterRecovery(t *testing.T) {
+	at := t0.Add(10 * time.Second)
+	in := valueTripped(t0.Add(50*time.Second), workload.Assessment{Pods: 2, Ready: 2})
+	in.Phase, in.FlagDisabledAt = v1alpha1.PhaseRecovered, &at
+	if d := Decide(in); d.Action != Rearm {
+		t.Fatalf("got %+v, want Rearm: a value that was put back leaves nothing to wait for", d)
+	}
+}
