@@ -1,0 +1,29 @@
+# Values for the official Flagsmith Helm chart, used by `make demo`.
+# Image tags are set by hack/demo/up.sh from FLAGSMITH_VERSION in hack/lib.sh.
+
+api:
+  image:
+    repository: flagsmith/flagsmith-api
+  extraEnv:
+    # Flagsmith refuses webhook URLs that resolve to private addresses (SSRF
+    # protection). Flagbreaker receives FLAG_UPDATED webhooks on an in-cluster
+    # Service, so its hostnames must be allowed explicitly.
+    SSRF_ALLOWED_HOSTS: "flagbreaker-webhook.flagbreaker-system.svc,flagbreaker-webhook.flagbreaker-system.svc.cluster.local"
+    # One gunicorn worker (about 190 MB each) is plenty for a demo; the image
+    # defaults to 3. Flagsmith's own fly.toml uses 1 for small installs.
+    GUNICORN_WORKERS: "1"
+    GUNICORN_THREADS: "4"
+
+frontend:
+  image:
+    repository: flagsmith/flagsmith-frontend
+  # extraEnv.FLAGSMITH_API_URL is set by hack/demo/up.sh from API_PORT. The
+  # dashboard proxies /api/v1 to the API service, so it is only a fallback
+  # for links the browser builds itself.
+
+# Run background work (webhooks, Feature Health tags) the way production
+# installs do, with retries, instead of in a thread inside the API pod.
+# The task processor gets api.extraEnv too, so GUNICORN_WORKERS above covers
+# both.
+taskProcessor:
+  enabled: true

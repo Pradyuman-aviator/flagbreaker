@@ -1,0 +1,60 @@
+# The demo workload and how it is guarded. hack/demo/up.sh fills in
+# __ENVIRONMENT_KEY__ (the Production environment's client-side key).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: shop
+  annotations:
+    # The one-line way to guard a flag: Flagbreaker creates the FlagGuard
+    # checkout-express-checkout from this, in the controller's default
+    # Flagsmith environment.
+    flagbreaker.dev/flags: "express_checkout"
+    flagbreaker.dev/stable-for: "20s"
+    flagbreaker.dev/runbook-url: "https://github.com/Pradyuman-aviator/flagbreaker/blob/main/docs/runbook.md"
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: checkout}
+  template:
+    metadata:
+      labels: {app: checkout}
+    spec:
+      containers:
+        - name: checkout
+          image: checkout-demo:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: FLAGSMITH_URL, value: "http://flagsmith-api.flagsmith:8000"}
+            - {name: FLAGSMITH_ENVIRONMENT_KEY, value: "__ENVIRONMENT_KEY__"}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
+---
+# The full form, with every setting in reach: which flag the workload depends
+# on, in which Flagsmith environment, and when to trip.
+apiVersion: flagbreaker.dev/v1alpha1
+kind: FlagGuard
+metadata:
+  name: checkout-new-pricing
+  namespace: shop
+spec:
+  flag: new_pricing
+  environmentKey: "__ENVIRONMENT_KEY__"
+  workload:
+    kind: Deployment
+    name: checkout
+  stableFor: 20s
+  links:
+    - title: Runbook
+      url: https://github.com/Pradyuman-aviator/flagbreaker/blob/main/docs/runbook.md
