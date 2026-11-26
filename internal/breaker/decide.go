@@ -75,6 +75,10 @@ type Input struct {
 	// Alerts are the Unhealthy events other Feature Health providers report
 	// for this flag and environment right now.
 	Alerts []Alert
+	// AlertsSince: only an alert that started at or after this (the latest
+	// switch-on, or when the guard began watching) can trip the guard. An
+	// alert that was already firing can't be about this switch-on.
+	AlertsSince time.Time
 	// HandledEventID is the newest alert event already acted on.
 	HandledEventID int64
 	// Dismissed is true when a person dismissed Flagbreaker's Unhealthy event
@@ -118,7 +122,10 @@ func Decide(in Input) Decision {
 	case v1alpha1.PhaseTripped:
 		return decideTripped(in)
 	case v1alpha1.PhaseRecovered:
-		if in.FlagEnabled {
+		switch {
+		case in.FlagEnabled && in.FlagDisabledAt == nil:
+			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the flag still on, so Flagbreaker is watching it again"}
+		case in.FlagEnabled:
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the flag is on again, so Flagbreaker is watching it again"}
 		}
 		return Decision{Mode: in.Mode}
@@ -135,7 +142,7 @@ func decideArmed(in Input) Decision {
 	if !in.FlagEnabled {
 		return d // nothing is on, so nothing to switch off or blame
 	}
-	if a := newestNewAlert(in.Alerts, in.HandledEventID); a != nil {
+	if a := newestNewAlert(in.Alerts, in.HandledEventID, in.AlertsSince); a != nil {
 		d.Action, d.Cause, d.Alert = Trip, CauseAlert, a
 		d.Why = fmt.Sprintf("%s reported %q in Flagsmith Feature Health at %s UTC", a.Provider, a.Title, a.At.UTC().Format(time.TimeOnly))
 		return d
@@ -151,6 +158,10 @@ func decideArmed(in Input) Decision {
 		return d // the breakage came first
 	case change.Acknowledged:
 		return d // a person dismissed the incident this change caused
+	case change.Tripped:
+		return d // this change already caused an incident; one is enough
+	case change.TimeUnknown:
+		return d // Flagbreaker wasn't running then, so it can't tell when
 	}
 
 	failing := in.Pods.FailingSince(change.At.Time)
@@ -212,11 +223,11 @@ func decideTripped(in Input) Decision {
 	return d
 }
 
-func newestNewAlert(alerts []Alert, handled int64) *Alert {
+func newestNewAlert(alerts []Alert, handled int64, since time.Time) *Alert {
 	var newest *Alert
 	for i := range alerts {
 		a := &alerts[i]
-		if a.EventID > handled && (newest == nil || a.EventID > newest.EventID) {
+		if a.EventID > handled && !a.At.Before(since) && (newest == nil || a.EventID > newest.EventID) {
 			newest = a
 		}
 	}
