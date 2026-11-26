@@ -52,8 +52,8 @@ resolve, or be dismissed.
 
 ## 4. Turn the flag back on
 
-After a bad value was put back, the flag is already on with the previous
-value, and Flagbreaker watches it again. Fix the value, then set it in
+After a bad value was put back, the flag has its previous value again, and
+is on or off as it was before; Flagbreaker watches it again. Fix the value, then set it in
 Flagsmith; if it breaks the workload again, the breaker trips again.
 
 After a switch-off, fix the cause first. Then do one of these:

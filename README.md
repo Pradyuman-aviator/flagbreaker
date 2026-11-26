@@ -244,10 +244,10 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
 ```mermaid
 stateDiagram-v2
   [*] --> Armed
-  Armed --> Tripped: pods fail after a switch-on, or another provider's alert fires
+  Armed --> Tripped: pods fail after a switch-on or a new value, or another provider's alert fires
   Tripped --> Recovered: pods healthy for stableFor and no alert firing
   Tripped --> Armed: a person re-enables the flag or dismisses the incident
-  Recovered --> Armed: the flag is on again, or at once after a bad value was put back
+  Recovered --> Armed: the flag is on again, it gets a new value, or at once after an incident a new value alone caused
 ```
 
 - **The decisions** live in one pure function,
@@ -257,7 +257,7 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 97 Go tests cover the rules, the client, webhook verification,
+- **Tests.** 109 Go tests cover the rules, the client, webhook verification,
   and whole incidents run through `Reconcile` against a fake Flagsmith,
   including one per bug that two independent code reviews found. On every
   push to main and every pull request, CI runs them, plus an end-to-end job

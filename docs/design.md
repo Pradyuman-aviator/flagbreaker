@@ -63,14 +63,13 @@ any time.
 ```mermaid
 stateDiagram-v2
   [*] --> Armed
-  Armed --> Tripped: pods fail after the flag is switched on,<br/>or another provider's alert fires
+  Armed --> Tripped: pods fail after the flag is switched on<br/>or gets a new value, or another provider's alert fires
   Tripped --> Recovered: all pods ready, no new crash for stableFor,<br/>and no alert still firing
   Tripped --> Armed: a person turns the flag back on,<br/>or dismisses the incident in Flagsmith
-  Recovered --> Armed: the flag is on again<br/>(by a person, or the restore annotation),<br/>or at once after a bad value was put back
+  Recovered --> Armed: the flag is on again<br/>(by a person, or the restore annotation), it gets a new value,<br/>or at once after an incident a new value alone caused
 ```
 
-**Trips (Armed → Tripped).** The flag's environment default is on and one of
-these holds:
+**Trips (Armed → Tripped).** One of these holds:
 
 - **Pods**: the flag was switched on, or its environment default got a new
   value, within `window` (10 minutes by default), and at least `failingPods`
@@ -81,7 +80,8 @@ these holds:
   minute of being created, with no restarts, is still starting up and doesn't
   count; evicted pods don't either. A workload that is still crash-looping
   from before the change, however long its back-off, is never blamed on it.
-- **Alert**: another Feature Health provider has an Unhealthy event for this
+- **Alert**: the flag's environment default is on, and another Feature
+  Health provider has an Unhealthy event for this
   flag that started after the flag was switched on. It counts whether the
   event names this environment or no environment.
 
@@ -118,8 +118,16 @@ was, in one versioned change, and leaves the flag on or off as it was. It
 does that only while the flag still has the value that caused it; a person's
 later change stands. In watch mode, a person setting any other value counts
 as the fix, as a switch-off does for a switch-on; switching the flag off
-doesn't. After verified recovery there is nothing left to wait for, so the
-guard is armed again at once.
+doesn't. After verified recovery, and once Feature Health has the Healthy
+report, there is nothing left to wait for, so the guard is armed again.
+
+**Both at once: recover first, blame second.** People often switch a flag
+on and edit its value close together, or in one save. When the workload
+breaks within `window` of both, nothing says which one did it, so each
+counts as a cause: act mode switches the flag off and puts the previous
+value back, and a watch-mode incident ends when a person switches the flag
+off. A fix, Flagbreaker's or a person's, belongs to its incident and is never
+blamed for a breakage itself, since blaming it would undo it.
 
 **Restore.** The `flagbreaker.dev/restore` annotation undoes Flagbreaker's
 own switch-off. It turns on the environment default and only the segment
