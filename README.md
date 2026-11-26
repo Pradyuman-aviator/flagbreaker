@@ -171,14 +171,13 @@ again. The [runbook](docs/runbook.md) covers each step.
 
 ## Install in your cluster
 
-Build the image, push it to a registry your cluster pulls from (on kind, use
-`kind load docker-image` instead), and install the chart from this repo:
+Each release publishes the chart and a multi-arch image (amd64 and arm64) to
+GHCR, through [release.yml](.github/workflows/release.yml). To install the
+latest one:
 
 ```sh
-docker build -t <registry>/flagbreaker:dev . && docker push <registry>/flagbreaker:dev
-kubectl apply --server-side -f charts/flagbreaker/crds/
-helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-namespace \
-  --set image.repository=<registry>/flagbreaker --set image.tag=dev \
+helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version 0.1.0 \
+  -n flagbreaker-system --create-namespace \
   --set flagsmith.url=http://flagsmith-api.flagsmith:8000 \
   --set flagsmith.apiKey=<organisation API key> \
   --set flagsmith.healthWebhookPath=/api/v1/feature-health/<path> \
@@ -186,10 +185,16 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
 kubectl annotate namespace <namespace> flagbreaker.dev/allowed-environments=<client-side environment key>
 ```
 
-Each tagged release also publishes multi-arch images and the chart to GHCR,
-through [release.yml](.github/workflows/release.yml). Once a release exists,
-`helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version <version> …`
-replaces the first line and the local chart path.
+To run your own build instead, push the image to a registry your cluster
+pulls from (on kind, use `kind load docker-image`), then install the chart
+from this repo with the same `flagsmith.*` settings:
+
+```sh
+docker build -t <registry>/flagbreaker:dev . && docker push <registry>/flagbreaker:dev
+kubectl apply --server-side -f charts/flagbreaker/crds/
+helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-namespace \
+  --set image.repository=<registry>/flagbreaker --set image.tag=dev  # plus the flagsmith.* settings above
+```
 
 - **`healthWebhookPath`.** Create a Webhook provider under Project Settings
   → Feature Health, or call `POST /api/v1/projects/{id}/feature-health/providers/`
