@@ -45,12 +45,16 @@ const (
 
 // fakeFlagsmith is the slice of Flagsmith's API that Flagbreaker calls.
 type fakeFlagsmith struct {
-	mu        sync.Mutex
-	def       bool
-	value     *flagsmith.Value
-	segments  map[int64]bool
-	conflict  bool
-	patch500  bool // every PATCH fails with a 500
+	mu       sync.Mutex
+	def      bool
+	value    *flagsmith.Value
+	segments map[int64]bool
+	conflict bool
+	patch500 bool // every PATCH fails with a 500
+	value500 bool // a PATCH that sets a value fails with a 500
+	// timeout: Flagsmith applies a PATCH, then answers 500, as when the
+	// request times out after Flagsmith applied it
+	timeout   bool
 	health500 bool // every Feature Health report fails with a 500
 	patches   int
 	events    []fakeEvent
@@ -101,6 +105,10 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} `json:"segment_overrides"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.value500 && body.Default != nil && len(body.Default.Value) > 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		for _, s := range body.Segments {
 			if f.experimentSegment != 0 && s.Segment.ID == f.experimentSegment {
 				w.WriteHeader(http.StatusConflict)
@@ -125,6 +133,10 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, s := range body.Segments {
 			f.segments[s.Segment.ID] = s.Enabled // Flagsmith creates missing overrides too
+		}
+		if f.timeout {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		writeJSON(w, f.flagJSON())
 	case r.URL.Path == fmt.Sprintf("/api/v1/projects/%d/feature-health/events/", projectID):

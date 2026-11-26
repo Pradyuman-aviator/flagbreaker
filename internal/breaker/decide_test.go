@@ -289,7 +289,7 @@ func TestAValueIncidentDoesNotWaitForTheFlagToBeSwitchedOff(t *testing.T) {
 func TestSettingTheBadValueAgainRearms(t *testing.T) {
 	at := t0.Add(10 * time.Second)
 	in := valueTripped(t0.Add(20*time.Second), failing(2, 0, t0.Add(3*time.Second)))
-	in.FlagDisabledAt, in.NewValueServed = &at, true
+	in.FlagDisabledAt, in.NewValueServed, in.ValueCameBack = &at, true, true
 	if d := Decide(in); d.Action != Rearm || !strings.Contains(d.Why, "set the new value again") {
 		t.Fatalf("got %+v, want Rearm", d)
 	}
@@ -317,6 +317,17 @@ func TestANewValueRearmsARecoveredGuard(t *testing.T) {
 	in.Phase, in.FlagEnabled, in.FlagDisabledAt = v1alpha1.PhaseRecovered, false, &at
 	if d := Decide(in); d.Action != Rearm || !strings.Contains(d.Why, "new value") {
 		t.Fatalf("got %+v, want Rearm for the new value", d)
+	}
+}
+
+func TestAValueNotYetPutBackIsRetriedAfterTheSwitchOff(t *testing.T) {
+	// A switch-on and a new value; the switch-off worked, the value PATCH
+	// didn't. That is no reason to re-arm: put the value back.
+	at := t0.Add(10 * time.Second)
+	in := valueTripped(t0.Add(15*time.Second), failing(2, 0, t0.Add(3*time.Second)))
+	in.AlsoSwitchedOn, in.FlagEnabled, in.NewValueServed, in.FlagDisabledAt = true, false, true, &at
+	if d := Decide(in); d.Action != SwitchOff {
+		t.Fatalf("got %+v, want a retry of putting the value back", d)
 	}
 }
 

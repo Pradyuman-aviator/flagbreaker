@@ -75,9 +75,10 @@ type Input struct {
 	// NewValueServed, for a value incident, is true while the flag still
 	// serves the value that caused it.
 	NewValueServed bool
-	// ValueKept, for an incident a switch-on and a new value caused, is true
-	// when its fix switched the flag off and left the new value in place.
-	ValueKept bool
+	// ValueCameBack, for a value incident, is true when the new value was
+	// set again after the incident began: a fix took it away, and a person
+	// put it back.
+	ValueCameBack bool
 	// HealthyReportPending is true while a Healthy report to Feature Health
 	// has failed or waits for other guards of the flag.
 	HealthyReportPending bool
@@ -229,7 +230,7 @@ func decideTripped(in Input) Decision {
 	switchOn := (!in.ValueIncident || in.AlsoSwitchedOn) && in.FlagEnabled
 	newValue := in.ValueIncident && in.NewValueServed
 	if switchOn || newValue {
-		if in.FlagDisabledAt != nil && (switchOn || !in.ValueKept) {
+		if in.FlagDisabledAt != nil && (switchOn || in.ValueCameBack) {
 			why := "a person turned the flag back on, so Flagbreaker is watching it again"
 			if newValue && !switchOn {
 				why = "a person set the new value again, so Flagbreaker is watching the flag again"

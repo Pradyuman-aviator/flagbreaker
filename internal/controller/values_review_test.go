@@ -239,3 +239,91 @@ func TestASwitchOffEndsACombinedIncidentWithoutAFalseRearm(t *testing.T) {
 		t.Fatalf("want Recovered, got %+v", g.Status)
 	}
 }
+
+// Second review round.
+
+func TestAFailedRevertAfterASwitchOffIsRetried(t *testing.T) {
+	w := offWithGoodValue(t, v1alpha1.ModeAct)
+	w.fs.set(func(f *fakeFlagsmith) { f.def, f.value = true, badValue })
+	w.at(5 * time.Second)
+	w.crashPods(t0.Add(7 * time.Second))
+	w.fs.set(func(f *fakeFlagsmith) { f.value500 = true })
+	w.tolerant(10 * time.Second) // switched off; the value PATCH fails
+	w.fs.set(func(f *fakeFlagsmith) { f.value500 = false })
+	g := w.at(15 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseTripped || !flagsmith.SameValue(w.value(), goodValue) {
+		t.Fatalf("the value must still be put back, not the guard re-armed: phase %s, value %+v, %s", g.Status.Phase, w.value(), timelineEvents(g))
+	}
+	if def, _ := w.flag(); def {
+		t.Fatal("the flag should stay off")
+	}
+}
+
+func TestATimedOutSwitchOffInACombinedIncidentStillPutsTheValueBack(t *testing.T) {
+	w := offWithGoodValue(t, v1alpha1.ModeAct)
+	w.fs.set(func(f *fakeFlagsmith) { f.def, f.value = true, badValue })
+	w.at(5 * time.Second)
+	w.crashPods(t0.Add(7 * time.Second))
+	w.fs.set(func(f *fakeFlagsmith) { f.timeout = true })
+	w.tolerant(10 * time.Second) // the switch-off is applied, then times out
+	w.fs.set(func(f *fakeFlagsmith) { f.timeout = false })
+	g := w.at(15 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseTripped || !flagsmith.SameValue(w.value(), goodValue) {
+		t.Fatalf("want Tripped with the value put back: phase %s, value %+v, %s", g.Status.Phase, w.value(), timelineEvents(g))
+	}
+}
+
+func TestATimedOutRevertOnAnOffFlagIsNotCalledASwitchOff(t *testing.T) {
+	w := offWithGoodValue(t, v1alpha1.ModeAct)
+	w.fs.set(func(f *fakeFlagsmith) { f.value = badValue })
+	w.at(5 * time.Second)
+	w.crashPods(t0.Add(7 * time.Second))
+	w.fs.set(func(f *fakeFlagsmith) { f.timeout = true })
+	w.tolerant(10 * time.Second) // the revert is applied, then times out
+	w.fs.set(func(f *fakeFlagsmith) { f.timeout = false })
+	g := w.at(15 * time.Second)
+	if ev := timelineEvents(g); strings.Contains(ev, "FlagSwitchedOff") || !strings.Contains(ev, "ValueReverted") {
+		t.Fatalf("the flag was off all along; timeline = %s", ev)
+	}
+}
+
+func TestAPersonsSwitchOffKeepsItsOwnTimeDuringAnIncident(t *testing.T) {
+	w := newWorld(t, v1alpha1.ModeWatch)
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	w.at(0)
+	w.fs.set(func(f *fakeFlagsmith) {
+		f.addEvent(flagsmith.ProviderGrafana, "fp1", "UNHEALTHY", []flagsmith.TextBlock{{Title: "ErrorRateHigh"}})
+	})
+	if g := w.at(5 * time.Second); g.Status.Phase != v1alpha1.PhaseTripped {
+		t.Fatalf("want an alert trip, got %+v", g.Status)
+	}
+	w.fs.set(func(f *fakeFlagsmith) { f.value = otherValue }) // pods are healthy
+	w.at(10 * time.Second)
+	w.fs.set(func(f *fakeFlagsmith) { f.def = false })
+	g := w.at(15 * time.Second)
+	if g.Status.FlagDisabledAt == nil || !g.Status.FlagDisabledAt.Time.Equal(t0.Add(10*time.Second)) {
+		t.Fatalf("the switch-off happened after the 10s check, not at the value edit: %+v", g.Status.FlagDisabledAt)
+	}
+}
+
+func TestAReportSentAfterReArmingStillSaysTheRecoveryWasVerified(t *testing.T) {
+	w := valueWorld(t, v1alpha1.ModeAct)
+	w.fs.set(func(f *fakeFlagsmith) { f.value = badValue })
+	w.at(5 * time.Second)
+	w.crashPods(t0.Add(7 * time.Second))
+	w.at(10 * time.Second)
+	w.healthyPods(2, t0.Add(12*time.Second))
+	w.at(15 * time.Second)
+	w.fs.set(func(f *fakeFlagsmith) { f.health500 = true })
+	w.at(36 * time.Second) // recovered; the Healthy report fails
+	w.fs.set(func(f *fakeFlagsmith) { f.value = otherValue })
+	if g := w.at(41 * time.Second); g.Status.Phase != v1alpha1.PhaseArmed {
+		t.Fatalf("a new value should re-arm the guard, got %+v", g.Status)
+	}
+	w.fs.set(func(f *fakeFlagsmith) { f.health500 = false })
+	w.at(46 * time.Second)
+	if ev := w.fs.lastOwnEvent(t); ev.Unhealthy() || strings.Contains(ev.FirstText(), "not a verified recovery") ||
+		!strings.Contains(ev.FirstText(), "verified healthy again") {
+		t.Fatalf("the recovery was verified: %s", ev.FirstText())
+	}
+}

@@ -205,6 +205,8 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 	}
 	var summary string
 	switch {
+	case status == flagsmith.Healthy && st.Phase == v1alpha1.PhaseArmed && st.RecoveredAt != nil:
+		summary = "The workload was verified healthy again before this report could be sent. Flagbreaker is watching the flag again."
 	case status == flagsmith.Healthy && st.Phase == v1alpha1.PhaseArmed && value:
 		summary = "A person set the new value again before Flagbreaker verified recovery, so Flagbreaker is watching the flag again. " +
 			"This is not a verified recovery: if the workload breaks again, the breaker trips again."

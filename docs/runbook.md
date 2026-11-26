@@ -29,8 +29,9 @@ kubectl get flagguard -n <namespace> <name> -o jsonpath='{range .status.timeline
 Watch mode reports and changes nothing. The event says which setting chose
 watch mode. To stop the incident, switch the flag off in Flagsmith yourself,
 or, if a new value caused it, set a value that works (the timeline shows the
-previous one). Switching the flag off doesn't end a value incident: apps read
-the value either way.
+previous one). If a new value alone caused it, switching the flag off doesn't
+end the incident: apps read the value either way. If the flag was also
+switched on just before, switching it off does.
 Flagbreaker notices who switched it off, restarts the pods that crashed, and
 reports Healthy once the workload has been healthy for `stableFor`.
 

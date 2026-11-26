@@ -187,7 +187,7 @@ func (r *FlagGuardReconciler) finalize(ctx context.Context, guard *v1alpha1.Flag
 		return nil
 	}
 	st := &guard.Status
-	healthyUnsent := st.Phase == v1alpha1.PhaseRecovered && !conditionTrue(st.Conditions, conditionReported)
+	healthyUnsent := (st.Phase == v1alpha1.PhaseRecovered || st.RecoveredAt != nil) && !conditionTrue(st.Conditions, conditionReported)
 	if (st.Phase == v1alpha1.PhaseTripped || healthyUnsent) && st.Environment != "" &&
 		r.environmentAllowed(ctx, guard.Namespace, guard.Spec.EnvironmentKey) == nil {
 		others, err := r.otherTrippedGuards(ctx, guard)
@@ -362,10 +362,8 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		Now: now, Phase: st.Phase, Mode: mode,
 		FlagEnabled: enabled, LastChange: st.LastFlagChange,
 		ValueIncident: valueIncident, AlsoSwitchedOn: valueIncident && st.Trigger.IsSwitchOn(),
-		NewValueServed: valueIncident && sameValue(&value, st.Trigger.Value),
-		// A person's fix for a switch-on with a new value is a switch-off,
-		// which leaves the value; only Flagbreaker puts it back too.
-		ValueKept:            isValueIncident(st) && !valueOnly(st) && st.FlagDisabledAt != nil && st.FlagDisabledBy != ChangedByFlagbreaker,
+		NewValueServed:       valueIncident && sameValue(&value, st.Trigger.Value),
+		ValueCameBack:        valueCameBack(st),
 		HealthyReportPending: healthyReportPending(st),
 		Pods:                 assessment, DesiredReplicas: t.desired, RolloutStartedAt: rolloutAt,
 		Alerts: alerts, AlertsSince: alertsSince(guard), HandledEventID: st.HandledEventID, Dismissed: dismissed,
@@ -483,7 +481,7 @@ func (r *FlagGuardReconciler) confirmSwitchOff(ctx context.Context, guard *v1alp
 	st.FlagDisabledAt, st.FlagDisabledBy = metaNow(change.At.Time), ChangedByFlagbreaker
 	// Flagbreaker's own change is never blamed for a breakage.
 	change.ChangedBy, change.Tripped = ChangedByFlagbreaker, true
-	if !change.Enabled {
+	if !change.Enabled && (st.Trigger == nil || st.Trigger.IsSwitchOn()) {
 		addTimeline(st, now, "FlagSwitchedOff",
 			fmt.Sprintf("Switched %s off in %s; Flagsmith applied the earlier request that timed out. Identity overrides and experiments are not changed.", spec.Flag, st.Environment))
 		metrics.SwitchOffs.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "flagbreaker").Inc()
@@ -526,6 +524,14 @@ func ownFix(trigger, change *v1alpha1.FlagChange) bool {
 		return sameValue(change.Value, trigger.PreviousValue)
 	}
 	return true
+}
+
+// valueCameBack reports whether, during a value incident, the new value was
+// set again after the incident began.
+func valueCameBack(st *v1alpha1.FlagGuardStatus) bool {
+	c := st.LastFlagChange
+	return isValueIncident(st) && st.TrippedAt != nil && c != nil && c.ValueChanged &&
+		sameValue(c.Value, st.Trigger.Value) && !c.At.Time.Before(st.TrippedAt.Time)
 }
 
 // healthyReportPending reports whether a Healthy report failed or is
@@ -614,7 +620,7 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 	// before is still a suspect, so undoing this change undoes it too, and
 	// the suspects count from the first of them.
 	spec := withDefaults(guard.Spec)
-	if p := st.LastFlagChange; stillSuspect(p, now, spec.Window.Duration) {
+	if p := st.LastFlagChange; st.Phase != v1alpha1.PhaseTripped && stillSuspect(p, now, spec.Window.Duration) {
 		carried := false
 		if p.IsSwitchOn() && enabled && !change.SwitchedOn {
 			change.SwitchedOn, carried = true, true
@@ -1119,7 +1125,13 @@ func (r *FlagGuardReconciler) rearm(ctx context.Context, guard *v1alpha1.FlagGua
 	}
 	st.SwitchOffAttemptedAt = nil
 	st.Phase = v1alpha1.PhaseArmed
+	recoveredAt := st.RecoveredAt
 	st.TrippedAt, st.FlagDisabledAt, st.FlagDisabledBy, st.HealthySince, st.RecoveredAt = nil, nil, "", nil, nil
+	if recoveredAt != nil && healthyReportPending(st) {
+		// The recovery was verified, but Feature Health hasn't heard yet. The
+		// report, once it goes out, still says so.
+		st.RecoveredAt = recoveredAt
+	}
 	// The trigger and the alert are cleared last: the Healthy report below
 	// still says what the incident was about.
 	defer func() { st.Trigger, st.Alert = nil, nil }()
