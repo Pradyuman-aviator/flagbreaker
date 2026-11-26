@@ -60,6 +60,32 @@ native_path() {
   fi
 }
 
+# pinned_sha256 TOOL -> the SHA-256 published for this tool version, OS and
+# CPU, pinned here so a download is checked against a value from this repo,
+# not one fetched from the same server as the download.
+pinned_sha256() {
+  case "$1-$OS-$ARCH" in
+    kind-linux-amd64) echo aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d ;;
+    kind-linux-arm64) echo 20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2 ;;
+    kind-darwin-amd64) echo 5a99f26f57246dc9319dd294803313197a0f34d33c525b3ea8b655db5916ece0 ;;
+    kind-darwin-arm64) echo 0c8c7dbe5e23594a198b786c4bc13dacc101fa6196b0cb0b23a1ca44e61f4b4f ;;
+    kind-windows-amd64) echo 4b22adaa135368c5a465d56bbd8e520cbea87272a06ca00b6078e7b81515c9fc ;;
+    kubectl-linux-amd64) echo 9a1b55af2795b25dd288dbef62387db9b5530087ab918d28c6ad067f2e3cb07c ;;
+    kubectl-linux-arm64) echo da160b41491cc5c5e575d78bb665810fb900f70fad666d834094b24ec56d304f ;;
+    kubectl-darwin-amd64) echo 82db1bc2b466e9f46ed36d609d8c10523a425664e6e648a666df252b9502fe9e ;;
+    kubectl-darwin-arm64) echo 7ac1234e7731e902e5ab2153e2ed29bbe7abddd7b0be5ffd94afb7df47da8f27 ;;
+    kubectl-windows-amd64) echo 98ee2ce86421b2e2ff24b4d3c081883487694371b8ca2e40e125f413677a5337 ;;
+    kubectl-windows-arm64) echo bf55dc93d14e9a49a57224e78088b6bb387564ff94c69090ac0ed22120f7f1f3 ;;
+    helm-linux-amd64) echo 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b ;;
+    helm-linux-arm64) echo 8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88 ;;
+    helm-darwin-amd64) echo 34bec4eba761ba5c16d1965ee6b8f5b0abe5993974a802274e2a4f0418893d89 ;;
+    helm-darwin-arm64) echo 6b4e61c8cd27d99e5a801e63ff25dd5c70b36875c2cd659d3e9ce6b76fc23198 ;;
+    helm-windows-amd64) echo fcfd7b796dcf0f225abc40b5636a3b01f55f3de2fb1dfb18475df94e62c14112 ;;
+    helm-windows-arm64) echo 373edaae86db70342ef39b014e2e7764ea8f9cff08714843daa5e55b5ee492f2 ;;
+    *) return 1 ;;
+  esac
+}
+
 KIND="$BIN_DIR/kind$EXE"
 KUBECTL="$BIN_DIR/kubectl$EXE"
 HELM="$BIN_DIR/helm$EXE"

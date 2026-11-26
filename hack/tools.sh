@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Downloads the pinned kind, kubectl and helm into ./bin and checks each
-# download against its published SHA-256. Skips tools that are already there.
+# download against the SHA-256 pinned in hack/lib.sh (copied from each
+# project's release). Skips tools that are already there.
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require curl tar
@@ -31,7 +32,7 @@ trap 'rm -rf "$tmp"' EXIT
 if [[ ! -x "$KIND" ]]; then
   log "downloading kind $KIND_VERSION"
   base="https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-$OS-$ARCH"
-  want="$(curl -fsSL "$base.sha256sum" | cut -d' ' -f1)"
+  want="$(pinned_sha256 kind)" || die "kind $KIND_VERSION has no build for $OS/$ARCH"
   fetch "$base" "$KIND" "$want"
   chmod +x "$KIND"
 fi
@@ -39,7 +40,7 @@ fi
 if [[ ! -x "$KUBECTL" ]]; then
   log "downloading kubectl $KUBECTL_VERSION"
   base="https://dl.k8s.io/release/$KUBECTL_VERSION/bin/$OS/$ARCH/kubectl$EXE"
-  want="$(curl -fsSL "$base.sha256")"
+  want="$(pinned_sha256 kubectl)" || die "no pinned kubectl checksum for $OS/$ARCH"
   fetch "$base" "$KUBECTL" "$want"
   chmod +x "$KUBECTL"
 fi
@@ -52,7 +53,7 @@ if [[ ! -x "$HELM" ]]; then
   else
     archive="helm-$HELM_VERSION-$OS-$ARCH.tar.gz"
   fi
-  want="$(curl -fsSL "https://get.helm.sh/$archive.sha256sum" | cut -d' ' -f1)"
+  want="$(pinned_sha256 helm)" || die "no pinned helm checksum for $OS/$ARCH"
   fetch "https://get.helm.sh/$archive" "$tmp/$archive" "$want"
   if [[ "$OS" == windows ]]; then
     unzip -q "$tmp/$archive" -d "$tmp"
