@@ -93,3 +93,16 @@ func TestKeepsSwitchOnsAndSwitchOffsApart(t *testing.T) {
 		t.Fatalf("Latest switch-on = %+v, %v; want the person's change", c, ok)
 	}
 }
+
+func TestIgnoresValueOnlyEdits(t *testing.T) {
+	store := NewStore()
+	h := Handler("s3cret", store, nil)
+	edit := strings.Replace(body, `"timestamp"`, `"previous_state": {"enabled": true, "environment": {"id": 1, "name": "Production"},
+	 "feature": {"id": 1, "name": "new_pricing"}, "feature_segment": null, "identity": null}, "timestamp"`, 1)
+	if code := post(h, edit, sign("s3cret", edit)); code != http.StatusNoContent {
+		t.Fatalf("status = %d", code)
+	}
+	if _, ok := store.Latest("Production", "new_pricing", true); ok {
+		t.Fatal("a value edit (enabled stays true) must not be recorded as a switch")
+	}
+}

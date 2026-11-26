@@ -68,9 +68,10 @@ func (s *Store) Latest(environment, feature string, enabled bool) (Change, bool)
 type payload struct {
 	EventType string `json:"event_type"`
 	Data      struct {
-		ChangedBy string        `json:"changed_by"`
-		Timestamp string        `json:"timestamp"`
-		NewState  *featureState `json:"new_state"`
+		ChangedBy     string        `json:"changed_by"`
+		Timestamp     string        `json:"timestamp"`
+		NewState      *featureState `json:"new_state"`
+		PreviousState *featureState `json:"previous_state"`
 	} `json:"data"`
 }
 
@@ -117,6 +118,12 @@ func Handler(secret string, store *Store, onChange func(environment, feature str
 		state := p.Data.NewState
 		if p.EventType != "FLAG_UPDATED" || state == nil || state.Identity != nil || state.FeatureSegment != nil {
 			w.WriteHeader(http.StatusNoContent) // not an environment-default change
+			return
+		}
+		if prev := p.Data.PreviousState; prev != nil && prev.Enabled == state.Enabled {
+			// A value or variant edit, not a switch: it must not take the
+			// place of the switch it follows.
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		at, err := time.Parse(timestampLayout, p.Data.Timestamp)
