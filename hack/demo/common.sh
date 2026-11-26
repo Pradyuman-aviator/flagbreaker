@@ -26,10 +26,16 @@ require_settled_guard() {
   die "FlagGuard $name should be Armed or Recovered before the test, is '${p:-unchecked}'"
 }
 
-# reset_demo: new_pricing off and the checkout app up, whatever an earlier
-# (perhaps failed) run left behind.
+# The value bootstrap.sh gives checkout_config, and one the app can't parse.
+GOOD_CONFIG='{"tax_rate": 0.08}'
+# shellcheck disable=SC2034 # used by the scripts that source this file
+BAD_CONFIG='{"tax_rate": "8%"}'
+
+# reset_demo: new_pricing off, checkout_config good and the checkout app up,
+# whatever an earlier (perhaps failed) run left behind.
 reset_demo() {
   switch "$FLAGSMITH_NEW_PRICING_ID" off
+  [[ -n "${FLAGSMITH_CONFIG_ID:-}" ]] && set_value "$FLAGSMITH_CONFIG_ID" "$GOOD_CONFIG"
   if ! "$KUBECTL" wait --for=condition=Available deployment/checkout -n shop --timeout=10s >/dev/null 2>&1; then
     log "the checkout app is down from an earlier run; restarting its pods"
     "$KUBECTL" delete pod -n shop -l app=checkout --wait=false >/dev/null

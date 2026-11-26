@@ -8,6 +8,10 @@
 //     demo's (staged) Grafana alert blames it for an error rate the pods
 //     can't see, which is the case for following other Feature Health
 //     providers.
+//   - checkout_config: remote config, a JSON value such as
+//     {"tax_rate": 0.08}. The app reads it whether or not the flag is on,
+//     like the SDK's GetFeatureValue does, and exits on a value it can't
+//     parse, like a service that trusts its config. Also staged.
 //
 // It serves a small checkout page on :8080 that refreshes itself, so the demo
 // shows the shop going down and coming back.
@@ -15,8 +19,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -29,9 +36,21 @@ import (
 const (
 	pricingFlag = "new_pricing"
 	expressFlag = "express_checkout"
+	configFlag  = "checkout_config"
+
+	subtotal = 42.00
 )
 
-var express atomic.Bool
+var (
+	express atomic.Bool
+	// taxRate holds the float64 bits of checkout_config's tax_rate.
+	taxRate atomic.Uint64
+)
+
+// checkoutConfig is checkout_config's value.
+type checkoutConfig struct {
+	TaxRate float64 `json:"tax_rate"`
+}
 
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en">
@@ -56,7 +75,9 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 <main>
   <div class="card">
     <h1>Acme checkout</h1>
-    <div class="total">$42.00</div>
+    <div class="total">${{.Total}}</div>
+    <div class="row"><span>Subtotal</span><span>${{.Subtotal}}</span></div>
+    <div class="row"><span>Tax ({{.TaxPercent}}, from checkout_config)</span><span>${{.Tax}}</span></div>
     <div class="row"><span>Pricing</span><span>classic</span></div>
     <div class="row"><span>Checkout</span><span{{if .Express}} class="on"{{end}}>{{if .Express}}express (one click){{else}}standard{{end}}</span></div>
     <div class="row"><span>Status</span><span class="up">&#9679; up</span></div>
@@ -74,6 +95,7 @@ func main() {
 		flagsmith.WithRequestTimeout(3*time.Second),
 	)
 
+	taxRate.Store(math.Float64bits(0.08))
 	checkFlags(client) // at startup
 	go func() {
 		for range time.Tick(time.Second) {
@@ -85,10 +107,16 @@ func main() {
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rate := math.Float64frombits(taxRate.Load())
+		tax := subtotal * rate
 		_ = page.Execute(w, map[string]any{
-			"Express": express.Load(),
-			"Pod":     pod,
-			"Time":    time.Now().UTC().Format(time.TimeOnly),
+			"Express":    express.Load(),
+			"Subtotal":   fmt.Sprintf("%.2f", subtotal),
+			"TaxPercent": fmt.Sprintf("%g%%", rate*100),
+			"Tax":        fmt.Sprintf("%.2f", tax),
+			"Total":      fmt.Sprintf("%.2f", subtotal+tax),
+			"Pod":        pod,
+			"Time":       time.Now().UTC().Format(time.TimeOnly),
 		})
 	})
 	log.Println("checkout listening on :8080 with classic pricing")
@@ -112,5 +140,15 @@ func checkFlags(client *flagsmith.Client) {
 	if on, _ := flags.IsFeatureEnabled(pricingFlag); on {
 		log.Printf("%s is on: loading the new pricing engine", pricingFlag)
 		log.Fatal("panic: pricing engine: price table v2 not found")
+	}
+	if raw, err := flags.GetFeatureValue(configFlag); err == nil && raw != nil {
+		var c checkoutConfig
+		if err := json.Unmarshal([]byte(fmt.Sprint(raw)), &c); err != nil {
+			log.Fatalf("panic: %s: %v", configFlag, err)
+		}
+		if bits := math.Float64bits(c.TaxRate); bits != taxRate.Load() {
+			taxRate.Store(bits)
+			log.Printf("%s: tax rate is now %g", configFlag, c.TaxRate)
+		}
 	}
 }

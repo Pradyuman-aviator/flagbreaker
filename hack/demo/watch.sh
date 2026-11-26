@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A live view of the demo in the terminal, to follow along or record next to
 # the Flagsmith dashboard. It shows:
-#   - what Flagsmith serves: the flags, the breaker's mode and policy;
+#   - what Flagsmith serves: the flags, checkout_config's value, the
+#     breaker's mode and policy;
 #   - whether the shop page answers;
 #   - the checkout pods;
 #   - each FlagGuard's phase and its last step;
@@ -55,13 +56,17 @@ flag_health() {
 }
 
 body() {
-  local cols width np ec mode policy events code pods guards
+  local cols width np ec cfg mode policy events code pods guards
   cols="$(tput cols 2>/dev/null || echo 120)"
   width=$((cols - 8))
   ((width < 40)) && width=40
 
   np="$(fs "$(flag_path "$FLAGSMITH_NEW_PRICING_ID")" 2>/dev/null || echo '{}')"
   ec="$(fs "$(flag_path "$FLAGSMITH_EXPRESS_CHECKOUT_ID")" 2>/dev/null || echo '{}')"
+  cfg=""
+  if [[ -n "${FLAGSMITH_CONFIG_ID:-}" ]]; then
+    cfg="$(fs "$(flag_path "$FLAGSMITH_CONFIG_ID")" 2>/dev/null || echo '{}')"
+  fi
   mode="$(value_of "$(fs "$(flag_path "$FLAGSMITH_MODE_ID")" 2>/dev/null || echo '{}')")"
   policy="$(value_of "$(fs "$(flag_path "$FLAGSMITH_POLICY_ID")" 2>/dev/null || echo '{}')")"
   events="$(fs "/api/v1/projects/$FLAGSMITH_PROJECT_ID/feature-health/events/" 2>/dev/null || echo '[]')"
@@ -82,7 +87,13 @@ body() {
   read -r h alerts <<<"$(flag_health "$events" "$FLAGSMITH_EXPRESS_CHECKOUT_ID")"
   printf '   %-18s %s                      Feature Health %s' express_checkout "$(onoff "$(enabled_of "$ec")")" "$(paint "$(health_colour "$h")" 9 "$h")"
   ((alerts > 0)) && printf '  %s%s alert firing%s' "$RED" "$alerts" "$OFF"
-  printf '\n\n'
+  printf '\n'
+  if [[ -n "$cfg" ]]; then
+    read -r h alerts <<<"$(flag_health "$events" "$FLAGSMITH_CONFIG_ID")"
+    printf '   %-18s %s  %s  Feature Health %s\n' checkout_config "$(onoff "$(enabled_of "$cfg")")" \
+      "$(paint "$BOLD" 18 "$(value_of "$cfg")")" "$(paint "$(health_colour "$h")" 9 "$h")"
+  fi
+  printf '\n'
 
   if [[ "$code" == 200 ]]; then
     printf ' %sSHOP%s       %s   %s● up%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$GREEN" "$OFF"

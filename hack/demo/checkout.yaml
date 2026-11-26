@@ -15,10 +15,10 @@ metadata:
   name: checkout
   namespace: shop
   annotations:
-    # The one-line way to guard a flag: Flagbreaker creates the FlagGuard
-    # checkout-express-checkout from this, in the controller's default
-    # Flagsmith environment.
-    flagbreaker.dev/flags: "express_checkout"
+    # The one-line way to guard flags: Flagbreaker creates the FlagGuards
+    # checkout-express-checkout and checkout-checkout-config from this, in
+    # the controller's default Flagsmith environment.
+    flagbreaker.dev/flags: "express_checkout,checkout_config"
     flagbreaker.dev/stable-for: "20s"
     flagbreaker.dev/runbook-url: "https://github.com/Pradyuman-aviator/flagbreaker/blob/main/docs/runbook.md"
 spec:
