@@ -1,0 +1,440 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: flagguards.flagbreaker.dev
+spec:
+  group: flagbreaker.dev
+  names:
+    kind: FlagGuard
+    listKind: FlagGuardList
+    plural: flagguards
+    shortNames:
+    - fg
+    singular: flagguard
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.flag
+      name: Flag
+      type: string
+    - jsonPath: .status.environment
+      name: Environment
+      type: string
+    - jsonPath: .spec.workload.kind
+      name: Kind
+      priority: 1
+      type: string
+    - jsonPath: .spec.workload.name
+      name: Workload
+      type: string
+    - jsonPath: .status.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FlagGuard ties a Flagsmith flag to the workload that depends on it. When the
+          workload breaks right after the flag changes, Flagbreaker reports it to
+          Flagsmith Feature Health and, in act mode, switches the flag off.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FlagGuardSpec says which flag a workload depends on and when
+              to trip.
+            properties:
+              environmentKey:
+                description: |-
+                  EnvironmentKey is the client-side key of the Flagsmith environment the
+                  workload reads its flags from. Flagbreaker looks up the environment's
+                  name and project from it.
+                minLength: 1
+                type: string
+              failingPods:
+                default: 1
+                description: FailingPods is how many pods must be failing to trip
+                  the breaker.
+                format: int32
+                minimum: 1
+                type: integer
+              flag:
+                description: Flag is the name of the Flagsmith feature the workload
+                  depends on.
+                minLength: 1
+                type: string
+              followHealthEvents:
+                default: true
+                description: |-
+                  FollowHealthEvents trips the breaker on Unhealthy events that other
+                  Feature Health providers report for this flag in this environment, such
+                  as a Grafana or Prometheus Alertmanager alert labelled with the flag.
+                  Recovery then also waits until those alerts are resolved or dismissed.
+                type: boolean
+              links:
+                description: |-
+                  Links are added to every Feature Health event, so the flag's Health tab
+                  in Flagsmith links to the runbook, dashboards or the workload.
+                items:
+                  description: Link is a titled URL.
+                  properties:
+                    title:
+                      minLength: 1
+                      type: string
+                    url:
+                      pattern: ^https?://
+                      type: string
+                  required:
+                  - title
+                  - url
+                  type: object
+                maxItems: 5
+                type: array
+              mode:
+                description: |-
+                  Mode overrides the mode set in Flagsmith by the flagbreaker_mode flag.
+                  watch reports to Feature Health only; act also switches the flag off.
+                enum:
+                - watch
+                - act
+                type: string
+              restartCrashingPods:
+                default: true
+                description: |-
+                  RestartCrashingPods deletes, once the flag is off, the pods that crashed
+                  after the flag change or are stuck in CrashLoopBackOff. They restart now
+                  instead of after the kubelet's back-off, which can reach five minutes.
+                  This also happens when a person switches the flag off during an
+                  incident in watch mode.
+                type: boolean
+              stableFor:
+                default: 30s
+                description: |-
+                  StableFor is how long every pod must stay ready, with no new crashes,
+                  before the workload counts as recovered.
+                type: string
+              window:
+                default: 10m
+                description: Window is how long after a flag change a breakage is
+                  blamed on it.
+                type: string
+              workload:
+                description: Workload is the Deployment, in this namespace, that depends
+                  on the flag.
+                properties:
+                  kind:
+                    default: Deployment
+                    description: Kind of the workload.
+                    enum:
+                    - Deployment
+                    - StatefulSet
+                    - DaemonSet
+                    type: string
+                  name:
+                    description: Name of the workload.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - environmentKey
+            - flag
+            - workload
+            type: object
+          status:
+            description: FlagGuardStatus is what Flagbreaker has observed and done.
+            properties:
+              alert:
+                description: |-
+                  Alert is the other provider's Feature Health alert that caused the
+                  current incident, when an alert rather than the pods tripped it.
+                properties:
+                  at:
+                    description: At is when the provider says the alert started.
+                    format: date-time
+                    type: string
+                  eventID:
+                    description: EventID is Flagsmith's ID for the event.
+                    format: int64
+                    type: integer
+                  provider:
+                    description: Provider is the Feature Health provider, such as
+                      Grafana.
+                    type: string
+                  title:
+                    description: Title is the alert's name, from the event's first
+                      text block.
+                    type: string
+                required:
+                - at
+                - eventID
+                - provider
+                type: object
+              conditions:
+                description: Conditions report problems such as an unreachable Flagsmith.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              environment:
+                description: Environment is the Flagsmith environment's name.
+                type: string
+              environmentID:
+                description: EnvironmentID is the Flagsmith environment's ID.
+                format: int64
+                type: integer
+              featureID:
+                description: FeatureID is the Flagsmith feature's ID.
+                format: int64
+                type: integer
+              flagDisabledAt:
+                description: |-
+                  FlagDisabledAt is when the flag was switched off during the current
+                  incident, by Flagbreaker or by a person.
+                format: date-time
+                type: string
+              flagDisabledBy:
+                description: |-
+                  FlagDisabledBy is who switched the flag off during the current
+                  incident.
+                type: string
+              flagEnabled:
+                description: |-
+                  FlagEnabled is what the flag's environment default served at the last
+                  check.
+                type: boolean
+              handledEventID:
+                description: |-
+                  HandledEventID is the newest Feature Health event from another
+                  provider that Flagbreaker has acted on. Older events never trip it
+                  again.
+                format: int64
+                type: integer
+              healthySince:
+                description: HealthySince is when every pod was last seen ready with
+                  no new crashes.
+                format: date-time
+                type: string
+              lastFlagChange:
+                description: LastFlagChange is the latest change Flagbreaker saw.
+                properties:
+                  acknowledged:
+                    description: |-
+                      Acknowledged is true when a person dismissed the incident this change
+                      caused, in Flagsmith's Health tab. The change is not blamed again.
+                    type: boolean
+                  at:
+                    description: At is when the change happened, or when Flagbreaker
+                      first saw it.
+                    format: date-time
+                    type: string
+                  changedBy:
+                    description: ChangedBy is who made the change, when Flagsmith
+                      says so.
+                    type: string
+                  enabled:
+                    description: Enabled is what the flag serves after the change.
+                    type: boolean
+                  workloadWasFailing:
+                    description: |-
+                      WorkloadWasFailing is true when the workload was already failing
+                      before the change. Flagbreaker never blames a flag for a breakage that
+                      came first.
+                    type: boolean
+                required:
+                - at
+                - enabled
+                type: object
+              mode:
+                description: Mode is the mode in effect at the last check.
+                enum:
+                - watch
+                - act
+                type: string
+              modeReason:
+                description: ModeReason says which setting decided the mode.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation the status
+                  is for.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is Armed, Tripped or Recovered.
+                type: string
+              projectID:
+                description: ProjectID is the Flagsmith project's ID.
+                format: int64
+                type: integer
+              recoveredAt:
+                description: RecoveredAt is when the workload was verified healthy
+                  again.
+                format: date-time
+                type: string
+              restoreRequest:
+                description: |-
+                  RestoreRequest is the last value of the flagbreaker.dev/restore
+                  annotation that Flagbreaker handled.
+                type: string
+              snapshot:
+                description: |-
+                  Snapshot is what the flag served before Flagbreaker switched it off. It
+                  is kept until the flag is restored, so the restore annotation can turn
+                  the segment overrides back on even after a person re-enabled the
+                  environment default by hand.
+                properties:
+                  enabled:
+                    description: Enabled is the environment default.
+                    type: boolean
+                  enabledSegmentOverrides:
+                    description: |-
+                      EnabledSegmentOverrides lists, by segment ID, the segment overrides
+                      that were on and that Flagbreaker switched off.
+                    items:
+                      format: int64
+                      type: integer
+                    type: array
+                required:
+                - enabled
+                type: object
+              timeline:
+                description: Timeline is the current incident, oldest first, at most
+                  20 entries.
+                items:
+                  description: TimelineEntry is one step of an incident.
+                  properties:
+                    event:
+                      description: Event is a short name, such as FlagChanged, Tripped
+                        or Recovered.
+                      type: string
+                    message:
+                      description: Message says what happened.
+                      type: string
+                    time:
+                      format: date-time
+                      type: string
+                  required:
+                  - event
+                  - message
+                  - time
+                  type: object
+                type: array
+              trigger:
+                description: Trigger is the flag change that caused the current incident.
+                properties:
+                  acknowledged:
+                    description: |-
+                      Acknowledged is true when a person dismissed the incident this change
+                      caused, in Flagsmith's Health tab. The change is not blamed again.
+                    type: boolean
+                  at:
+                    description: At is when the change happened, or when Flagbreaker
+                      first saw it.
+                    format: date-time
+                    type: string
+                  changedBy:
+                    description: ChangedBy is who made the change, when Flagsmith
+                      says so.
+                    type: string
+                  enabled:
+                    description: Enabled is what the flag serves after the change.
+                    type: boolean
+                  workloadWasFailing:
+                    description: |-
+                      WorkloadWasFailing is true when the workload was already failing
+                      before the change. Flagbreaker never blames a flag for a breakage that
+                      came first.
+                    type: boolean
+                required:
+                - at
+                - enabled
+                type: object
+              trippedAt:
+                description: TrippedAt is when the breaker tripped.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
