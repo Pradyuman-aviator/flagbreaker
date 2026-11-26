@@ -8,11 +8,14 @@
 //     demo's (staged) Grafana alert blames it for an error rate the pods
 //     can't see, which is the case for following other Feature Health
 //     providers.
+//
+// It serves a small checkout page on :8080 that refreshes itself, so the demo
+// shows the shop going down and coming back.
 package main
 
 import (
 	"context"
-	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"os"
@@ -30,6 +33,40 @@ const (
 
 var express atomic.Bool
 
+var page = template.Must(template.New("page").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="2">
+<title>Acme checkout</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #f6f6f8; color: #1d1d1f; margin: 0; }
+  main { max-width: 26rem; margin: 3rem auto; padding: 0 1rem; }
+  .card { background: #fff; border: 1px solid #e2e2e6; border-radius: 10px; padding: 1.5rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 1rem; }
+  .total { font-size: 2.2rem; font-weight: 650; margin: .25rem 0 1rem; }
+  .row { display: flex; justify-content: space-between; padding: .4rem 0; border-top: 1px solid #eee; }
+  .on { color: #176f2c; font-weight: 600; }
+  .muted { color: #6e6e73; font-size: .8rem; margin-top: 1rem; }
+  .up { color: #176f2c; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Acme checkout</h1>
+    <div class="total">$42.00</div>
+    <div class="row"><span>Pricing</span><span>classic</span></div>
+    <div class="row"><span>Checkout</span><span{{if .Express}} class="on"{{end}}>{{if .Express}}express (one click){{else}}standard{{end}}</span></div>
+    <div class="row"><span>Status</span><span class="up">&#9679; up</span></div>
+  </div>
+  <p class="muted">Served by {{.Pod}} at {{.Time}} UTC. Flags come from Flagsmith; this page refreshes every 2 seconds.</p>
+</main>
+</body>
+</html>
+`))
+
 func main() {
 	apiURL := strings.TrimRight(os.Getenv("FLAGSMITH_URL"), "/") + "/api/v1/"
 	client := flagsmith.NewClient(os.Getenv("FLAGSMITH_ENVIRONMENT_KEY"),
@@ -39,18 +76,20 @@ func main() {
 
 	checkFlags(client) // at startup
 	go func() {
-		for range time.Tick(2 * time.Second) {
+		for range time.Tick(time.Second) {
 			checkFlags(client)
 		}
 	}()
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
+	pod, _ := os.Hostname()
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		mode := "classic checkout"
-		if express.Load() {
-			mode = "express checkout"
-		}
-		fmt.Fprintf(w, "checkout: total $42.00 (classic pricing, %s)\n", mode)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = page.Execute(w, map[string]any{
+			"Express": express.Load(),
+			"Pod":     pod,
+			"Time":    time.Now().UTC().Format(time.TimeOnly),
+		})
 	})
 	log.Println("checkout listening on :8080 with classic pricing")
 	log.Fatal(http.ListenAndServe(":8080", nil))
