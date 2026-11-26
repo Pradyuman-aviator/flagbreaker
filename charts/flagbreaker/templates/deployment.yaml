@@ -23,14 +23,22 @@ metadata:
   labels: {{- include "flagbreaker.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # One replica, replaced rather than rolled: the old pod hands over its
+  # leader lease as it exits, and the webhook Service never points at a
+  # standby.
+  strategy:
+    type: Recreate
   selector:
     matchLabels: {{- include "flagbreaker.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels: {{- include "flagbreaker.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
-      annotations: {{- toYaml . | nindent 8 }}
-      {{- end }}
+      annotations:
+        # Restart the pod when the Flagsmith settings or credentials change.
+        checksum/flagsmith: {{ .Values.flagsmith | toJson | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "flagbreaker.name" . }}
       securityContext:
@@ -42,12 +50,13 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --flagsmith-url={{ .Values.flagsmith.url }}
-            - --sync-period={{ .Values.syncPeriod }}
-            - --webhook-bind-address={{ if .Values.webhook.enabled }}:{{ .Values.webhook.port }}{{ end }}
-            - --annotations={{ .Values.annotations.enabled }}
+            - {{ printf "--flagsmith-url=%s" .Values.flagsmith.url | quote }}
+            - {{ printf "--sync-period=%v" .Values.syncPeriod | quote }}
+            - {{ printf "--webhook-bind-address=%s" (ternary (printf ":%v" .Values.webhook.port) "" .Values.webhook.enabled) | quote }}
+            - {{ printf "--annotations=%v" .Values.annotations.enabled | quote }}
+            - {{ printf "--require-namespace-opt-in=%v" .Values.security.requireNamespaceOptIn | quote }}
             {{- with .Values.workloadLinkTemplate }}
-            - --workload-link-template={{ . }}
+            - {{ printf "--workload-link-template=%s" . | quote }}
             {{- end }}
           env:
             - name: FLAGSMITH_SETTINGS_ENVIRONMENT_KEY

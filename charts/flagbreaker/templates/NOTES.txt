@@ -1,0 +1,23 @@
+Flagbreaker is running in {{ .Release.Namespace }}.
+
+{{- if .Values.security.requireNamespaceOptIn }}
+
+1. Let a namespace act on a Flagsmith environment (cluster admins only):
+
+     kubectl annotate namespace <namespace> flagbreaker.dev/allowed-environments=<client-side environment key>
+{{- end }}
+
+2. Guard a workload with one annotation:
+
+     kubectl annotate deployment <name> -n <namespace> flagbreaker.dev/flags=<flag_name>{{ if not .Values.flagsmith.defaultEnvironmentKey }} flagbreaker.dev/environment-key=<key>{{ end }}
+
+   or write a FlagGuard. Then:
+
+     kubectl get flagguards -A
+
+3. Flagbreaker {{ if .Values.flagsmith.settingsEnvironmentKey }}reads flagbreaker_enabled, flagbreaker_mode and flagbreaker_policy from Flagsmith{{ else }}has no settings environment, so a guard acts only if its spec.mode is act{{ end }}.
+   It watches (reports only) unless something says act and nothing says watch.
+
+Upgrading: Helm installs CRDs only once. Apply the new CRD before `helm upgrade`:
+
+     kubectl apply --server-side -f https://raw.githubusercontent.com/Pradyuman-aviator/flagbreaker/v{{ .Chart.AppVersion }}/charts/flagbreaker/crds/flagbreaker.dev_flagguards.yaml

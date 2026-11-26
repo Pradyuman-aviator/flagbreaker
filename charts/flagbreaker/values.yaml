@@ -4,9 +4,20 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-# One replica is enough: leader election makes sure only one replica ever
-# changes flags, so more replicas only add standby.
+# Keep one. Leader election makes sure only one replica ever changes flags,
+# so more replicas only add standbys, and Flagsmith's webhooks could then
+# reach a standby, which drops them (polling still sees every change).
 replicaCount: 1
+
+security:
+  # A FlagGuard may act only on the Flagsmith environments its namespace
+  # lists in the flagbreaker.dev/allowed-environments annotation (client-side
+  # keys, comma separated, or "*"). Flagbreaker acts with an organisation API
+  # key, so without this, anyone who can create a FlagGuard or annotate a
+  # workload in any namespace could switch off any flag. Only cluster admins
+  # can annotate namespaces:
+  #   kubectl annotate namespace shop flagbreaker.dev/allowed-environments=<key>
+  requireNamespaceOptIn: true
 
 flagsmith:
   # Flagsmith API base URL, without /api/v1.
@@ -57,12 +68,14 @@ webhook:
   enabled: true
   port: 8082
 
+# Pods, ReplicaSets and workloads are cached cluster-wide (without managed
+# fields). Raise the limit on clusters with many thousands of pods.
 resources:
   requests:
     cpu: 10m
     memory: 64Mi
   limits:
-    memory: 128Mi
+    memory: 256Mi
 
 nodeSelector: {}
 tolerations: []

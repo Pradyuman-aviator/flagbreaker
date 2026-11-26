@@ -17,6 +17,10 @@ rules:
     # delete restarts crash-looping pods after a switch-off
     # (FlagGuard spec.restartCrashingPods).
     verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    # Reads the flagbreaker.dev/allowed-environments annotation.
+    resources: [namespaces]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
     # ReplicaSets and ControllerRevisions show when a workload last rolled
     # out, so a deploy that coincides with a flag change isn't blamed on it.
