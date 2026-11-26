@@ -72,11 +72,12 @@ these holds:
 
 - **Pods**: the flag was switched on within `window` (10 minutes by default),
   and at least `failingPods` pods failed after that. A container that exited
-  non-zero or was OOM-killed counts as failing, and so does a pod not ready for
-  20 s.
-- **Alert**: another Feature Health provider has an active Unhealthy event
-  for this flag. It counts whether the event names this environment or no
-  environment.
+  non-zero or was OOM-killed counts as failing, and so does a pod that was
+  ready and then stayed not ready for 20 s. A new pod that is slow to start
+  doesn't count, and neither do evicted pods.
+- **Alert**: another Feature Health provider has an Unhealthy event for this
+  flag that started after the flag was switched on. It counts whether the
+  event names this environment or no environment.
 
 **Never blamed**
 
@@ -86,6 +87,10 @@ these holds:
 - A change made when a rollout started at the same time. The deploy may be
   the cause, so the trip only reports and leaves the flag on.
 - A change a person acknowledged, by dismissing the incident in Flagsmith.
+- A change that already caused an incident. Each change is blamed once, so
+  a workload that heals with the flag still on doesn't trip again.
+- A change made while Flagbreaker wasn't running. Its time is unknown until
+  a `FLAG_UPDATED` webhook says when it happened.
 - An alert event already handled. A person who re-enables a flag despite an
   old alert is respected.
 
@@ -147,6 +152,15 @@ feature-state endpoints return 400 under versioning v2.
 
 ## Safety
 
+- **Namespace fence.** Flagbreaker acts with an organisation API key.
+  - A FlagGuard may act only on Flagsmith environments that its namespace
+    lists in the `flagbreaker.dev/allowed-environments` annotation, as
+    client-side keys or `*`.
+  - Namespaces are cluster-scoped, so only a cluster admin can grant this.
+    A user who can create FlagGuards in one namespace can't switch off
+    another team's flags.
+  - A guard that isn't allowed reads and writes nothing in Flagsmith.
+  - `--require-namespace-opt-in=false` turns the check off.
 - **Leader election.** Only one replica ever changes flags.
 - **Change requests.** If an environment requires change requests, Flagsmith
   answers 409. Flagbreaker then drops to watch and sets the
@@ -157,12 +171,18 @@ feature-state endpoints return 400 under versioning v2.
 - **One health slot.** Feature Health keeps one Webhook-provider status per
   flag and environment. Healthy is reported only when every guard of that flag
   has recovered.
-- **Fresh reads.** Each check reads the guard past the controller's cache.
-  A check never starts from a status older than the last one written, so an
-  action is not repeated from stale state.
+- **Fresh reads, kept writes.** Each check reads the guard past the
+  controller's cache. If writing the status fails after the flag was already
+  switched off, the status is kept and written on the next check, so an
+  incident is never forgotten.
+- **No silent no-ops.** Redirects are followed only for GET. Every
+  switch-off is checked against the flag state Flagsmith returns.
+- **Deleting a guard mid-incident.** A finalizer clears its Unhealthy event
+  and says that this isn't a verified recovery.
 - **Credentials.** The org API key and the Feature Health path live in a
-  Secret, never in flags or the pod spec. Health event URLs are redacted in
-  logs.
+  Secret, never in flags or the pod spec. The secret path is redacted from
+  every error, including network errors, so it never reaches a FlagGuard's
+  status or the logs.
 
 ## Watching a workload
 
