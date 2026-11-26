@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit tests and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test (with the race detector)
+        run: go test -race -count=1 ./...
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          [ -z "$unformatted" ] || { echo "run gofmt on: $unformatted"; exit 1; }
+      - name: generated code and CRD are up to date
+        run: |
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0 object paths=./api/v1alpha1 \
+            crd:crdVersions=v1 output:crd:artifacts:config=charts/flagbreaker/crds
+          git diff --exit-code
+      - name: shellcheck
+        run: shellcheck -x -P SCRIPTDIR hack/*.sh hack/demo/*.sh
+      - name: helm lint
+        run: |
+          bash hack/tools.sh
+          bin/helm lint charts/flagbreaker --set flagsmith.apiKey=x --set flagsmith.healthWebhookPath=/api/v1/feature-health/x
+
+  e2e:
+    name: end to end on kind with self-hosted Flagsmith
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: bring up kind, Flagsmith, Flagbreaker and the demo app
+        run: bash hack/demo/up.sh
+      - name: act mode, restore, watch mode, Grafana alert
+        run: bash hack/demo/e2e-all.sh
+      - name: show what happened
+        if: failure()
+        run: |
+          export KUBECONFIG=.demo/kubeconfig
+          bin/kubectl get flagguards -A -o yaml || true
+          bin/kubectl get pods -A || true
+          bin/kubectl logs -n flagbreaker-system deployment/flagbreaker --tail=300 || true
+          bin/kubectl logs -n flagsmith -l app.kubernetes.io/component=api --tail=100 || true
