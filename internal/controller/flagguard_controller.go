@@ -536,7 +536,7 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 	}
 	// Was it failing just before? Old crashes stay in pod status long after
 	// a pod recovers, so look back only a little.
-	change.WorkloadWasFailing = enabled && wasFailing(a, change.At.Time, change.At.Add(-lookback(withDefaults(guard.Spec))))
+	change.WorkloadWasFailing = enabled && wasFailing(a, change.At.Time, failingFrom(st, withDefaults(guard.Spec), change.At.Time))
 	st.LastFlagChange = change
 	return change
 }
@@ -551,7 +551,7 @@ func (r *FlagGuardReconciler) enrich(guard *v1alpha1.FlagGuard, a workload.Asses
 	if c := st.LastFlagChange; c != nil && c.TimeUnknown {
 		if w, ok := r.Changes.Latest(st.EnvironmentID, st.FeatureID, c.Enabled); ok && matches(w, c.At.Add(-recentWebhook), c.At.Add(r.SyncPeriod), r.SyncPeriod) {
 			c.At, c.ChangedBy, c.TimeUnknown = metav1.NewTime(w.At), w.ChangedBy, false
-			c.WorkloadWasFailing = c.Enabled && wasFailing(a, c.At.Time, c.At.Add(-lookback(withDefaults(guard.Spec))))
+			c.WorkloadWasFailing = c.Enabled && wasFailing(a, c.At.Time, failingFrom(st, withDefaults(guard.Spec), c.At.Time))
 		}
 	}
 	for _, c := range []*v1alpha1.FlagChange{st.LastFlagChange, st.Trigger} {
@@ -953,13 +953,7 @@ func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1
 		// (say, still crash-looping after a dismissal), the restore isn't
 		// blamed for that. Crashes from before a verified recovery belong to
 		// the incident, not to now: Kubernetes keeps a pod's last crash.
-		since := now.Add(-lookback(spec))
-		if st.RecoveredAt != nil {
-			if healthyFrom := st.RecoveredAt.Add(-spec.StableFor.Duration); healthyFrom.After(since) {
-				since = healthyFrom
-			}
-		}
-		failing := wasFailing(a, now, since)
+		failing := wasFailing(a, now, failingFrom(st, spec, now))
 
 		on := true
 		st.FlagEnabled = &on

@@ -313,6 +313,30 @@ func TestARestoreAfterRecoveryIsBlamedWhenItBreaksAgain(t *testing.T) {
 	}
 }
 
+func TestSwitchingOnSoonAfterARecoveryIsBlamedWhenItBreaksAgain(t *testing.T) {
+	// CI caught this: a person turns the flag back on less than a minute
+	// after a verified recovery, while a pod's status still shows the crash
+	// it had during the incident. That old crash must not count as "already
+	// failing".
+	w := newWorld(t, v1alpha1.ModeAct)
+	w.tripNewPricing()
+	w.healthyPods(2, t0.Add(12*time.Second))
+	w.healAfterCrash(t0.Add(11*time.Second), t0.Add(12*time.Second)) // one last crash, after the switch-off
+	w.at(15 * time.Second)
+	if g := w.at(36 * time.Second); g.Status.Phase != v1alpha1.PhaseRecovered {
+		t.Fatalf("want Recovered: %+v", g.Status)
+	}
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	g := w.at(40 * time.Second)
+	if g.Status.LastFlagChange == nil || g.Status.LastFlagChange.WorkloadWasFailing {
+		t.Fatalf("the incident's crash must not count as failing before the new switch-on: %+v", g.Status.LastFlagChange)
+	}
+	w.crashPods(t0.Add(42 * time.Second))
+	if g = w.at(45 * time.Second); g.Status.Phase != v1alpha1.PhaseTripped {
+		t.Fatalf("the new switch-on should trip the breaker: %+v", g.Status)
+	}
+}
+
 func TestANamespaceMustOptIntoAnEnvironment(t *testing.T) {
 	w := newWorld(t, v1alpha1.ModeAct)
 	w.r.RequireNamespaceOptIn = true

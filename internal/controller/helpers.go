@@ -229,6 +229,20 @@ func wasFailing(a workload.Assessment, t, since time.Time) bool {
 	return len(a.FailingBetween(since, t)) > 0 || len(a.BrokenBefore(t)) > 0
 }
 
+// failingFrom is where the look-back for "was the workload already failing
+// at t?" starts: lookback before t, but never before the last verified
+// recovery. Kubernetes keeps a pod's last crash in its status, and crashes
+// from before a verified recovery belong to that incident, not to now.
+func failingFrom(st *v1alpha1.FlagGuardStatus, spec v1alpha1.FlagGuardSpec, t time.Time) time.Time {
+	from := t.Add(-lookback(spec))
+	if st.RecoveredAt != nil && spec.StableFor != nil {
+		if healthy := st.RecoveredAt.Add(-spec.StableFor.Duration); healthy.After(from) && healthy.Before(t) {
+			from = healthy
+		}
+	}
+	return from
+}
+
 // lookback is how far before a change Flagbreaker looks to decide whether
 // the workload was failing already: Kubernetes keeps a container's last
 // crash long after it recovers, so not far.
