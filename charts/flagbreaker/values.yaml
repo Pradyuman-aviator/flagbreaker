@@ -63,8 +63,10 @@ podAnnotations: {}
 
 webhook:
   # Receives Flagsmith FLAG_UPDATED webhooks for exact change times. Point an
-  # environment webhook at http://<release>-webhook.<namespace>.svc:8082/webhooks/flagsmith
-  # and add that host to Flagsmith's SSRF_ALLOWED_HOSTS.
+  # environment webhook at http://<release>-webhook.<namespace>.svc:8082/webhooks/flagsmith,
+  # give it a secret and set the same one as flagsmith.webhookSecret, and add
+  # that host to Flagsmith's SSRF_ALLOWED_HOSTS. Without a secret the receiver
+  # doesn't start, and changes are found by polling alone.
   enabled: true
   port: 8082
 
