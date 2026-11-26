@@ -182,13 +182,23 @@ GHCR, through [release.yml](.github/workflows/release.yml). To install the
 latest one:
 
 ```sh
-helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version 0.1.0 \
+helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version 0.2.0 \
   -n flagbreaker-system --create-namespace \
   --set flagsmith.url=http://flagsmith-api.flagsmith:8000 \
   --set flagsmith.apiKey=<organisation API key> \
   --set flagsmith.healthWebhookPath=/api/v1/feature-health/<path> \
   --set flagsmith.settingsEnvironmentKey=<environment holding the flagbreaker_* flags>
 kubectl annotate namespace <namespace> flagbreaker.dev/allowed-environments=<client-side environment key>
+```
+
+To upgrade, apply the new CRD first, because `helm upgrade` never updates
+CRDs. Without it, the API server drops the status fields the new version
+writes, such as the flag's value.
+
+```sh
+kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/Pradyuman-aviator/flagbreaker/v0.2.0/charts/flagbreaker/crds/flagbreaker.dev_flagguards.yaml
+helm upgrade flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version 0.2.0 \
+  -n flagbreaker-system --reuse-values
 ```
 
 To run your own build instead, push the image to a registry your cluster
