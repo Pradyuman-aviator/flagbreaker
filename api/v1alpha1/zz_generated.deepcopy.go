@@ -156,6 +156,10 @@ func (in *FlagGuardStatus) DeepCopyInto(out *FlagGuardStatus) {
 		in, out := &in.FlagDisabledAt, &out.FlagDisabledAt
 		*out = (*in).DeepCopy()
 	}
+	if in.SwitchOffAttemptedAt != nil {
+		in, out := &in.SwitchOffAttemptedAt, &out.SwitchOffAttemptedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.HealthySince != nil {
 		in, out := &in.HealthySince, &out.HealthySince
 		*out = (*in).DeepCopy()

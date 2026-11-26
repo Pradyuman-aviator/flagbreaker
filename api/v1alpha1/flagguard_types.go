@@ -40,11 +40,15 @@ type FlagGuardSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	EnvironmentKey string `json:"environmentKey"`
 
-	// Workload is the Deployment, in this namespace, that depends on the flag.
+	// Workload is the Deployment, StatefulSet or DaemonSet, in this
+	// namespace, that depends on the flag.
 	Workload WorkloadReference `json:"workload"`
 
-	// Mode overrides the mode set in Flagsmith by the flagbreaker_mode flag.
-	// watch reports to Feature Health only; act also switches the flag off.
+	// Mode is this guard's say in the mode: watch reports to Feature Health
+	// only; act also switches the flag off. Flagbreaker also asks
+	// flagbreaker_policy and flagbreaker_mode in Flagsmith, and the most
+	// cautious answer wins: it acts only when something says act and nothing
+	// says watch.
 	// +optional
 	Mode Mode `json:"mode,omitempty"`
 
@@ -128,7 +132,9 @@ const RestoreAnnotation = "flagbreaker.dev/restore"
 
 // FlagChange records a change to the flag's environment default.
 type FlagChange struct {
-	// At is when the change happened, or when Flagbreaker first saw it.
+	// At is when the change happened, from Flagsmith's webhook. Without one,
+	// it is the check before the change was seen: the earliest it can have
+	// happened.
 	At metav1.Time `json:"at"`
 	// Enabled is what the flag serves after the change.
 	Enabled bool `json:"enabled"`
@@ -264,6 +270,12 @@ type FlagGuardStatus struct {
 	// +optional
 	FlagDisabledBy string `json:"flagDisabledBy,omitempty"`
 
+	// SwitchOffAttemptedAt is set while a switch-off Flagbreaker sent hasn't
+	// been confirmed, for example after a timeout. If the flag then turns out
+	// to be off, it was Flagbreaker's switch-off, not a person's.
+	// +optional
+	SwitchOffAttemptedAt *metav1.Time `json:"switchOffAttemptedAt,omitempty"`
+
 	// HealthySince is when every pod was last seen ready with no new crashes.
 	// +optional
 	HealthySince *metav1.Time `json:"healthySince,omitempty"`
@@ -303,6 +315,7 @@ type FlagGuardStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=fg
 // +kubebuilder:printcolumn:name="Flag",type=string,JSONPath=`.spec.flag`
+// +kubebuilder:printcolumn:name="On",type=boolean,JSONPath=`.status.flagEnabled`
 // +kubebuilder:printcolumn:name="Environment",type=string,JSONPath=`.status.environment`
 // +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.workload.kind`,priority=1
 // +kubebuilder:printcolumn:name="Workload",type=string,JSONPath=`.spec.workload.name`
