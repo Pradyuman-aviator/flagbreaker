@@ -1,0 +1,4 @@
+# Keep LF everywhere. The bash scripts break with CRLF endings, which Git
+# for Windows would otherwise create on checkout (core.autocrlf).
+* text=auto eol=lf
+*.png binary
