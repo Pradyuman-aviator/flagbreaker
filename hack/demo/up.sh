@@ -3,8 +3,8 @@
 # official Helm chart, a scripted first-time setup, Flagbreaker from
 # charts/flagbreaker and the checkout demo app. Safe to re-run.
 #
-# Needs Docker (with about 3 GB of memory free), curl and jq. Set API_PORT
-# and UI_PORT if 8000 or 8080 is taken on your machine.
+# Needs Docker (with about 3 GB of memory free), curl and jq. Set API_PORT,
+# UI_PORT or APP_PORT if 8000, 8080 or 8090 is taken on your machine.
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 require docker curl jq
@@ -20,9 +20,9 @@ if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   log "kind cluster $CLUSTER_NAME already exists"
   "$KIND" export kubeconfig --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG" >/dev/null
 else
-  for port in "$API_PORT" "$UI_PORT"; do
+  for port in "$API_PORT" "$UI_PORT" "$APP_PORT"; do
     if port_in_use "$port"; then
-      die "port $port is already in use on this machine. Free it, or pick others: API_PORT=18000 UI_PORT=18080 bash hack/demo/up.sh"
+      die "port $port is already in use on this machine. Free it, or pick others: API_PORT=18000 UI_PORT=18080 APP_PORT=18090 bash hack/demo/up.sh"
     fi
   done
   node_image="$KIND_NODE_IMAGE"
@@ -44,9 +44,16 @@ nodes:
       - containerPort: 30081 # Flagsmith dashboard
         hostPort: $UI_PORT
         listenAddress: "127.0.0.1"
+      - containerPort: 30082 # the demo shop (hack/demo/checkout.yaml)
+        hostPort: $APP_PORT
+        listenAddress: "127.0.0.1"
 EOF
   "$KIND" create cluster --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG" \
     --config "$(native_path "$DEMO_DIR/kind-config.yaml")" --wait 2m
+  # The ports this cluster maps, as defaults for the other scripts. A port
+  # set in the environment still wins.
+  # shellcheck disable=SC2016 # written out literally, expanded when sourced
+  printf ': "${API_PORT:=%s}"\n: "${UI_PORT:=%s}"\n: "${APP_PORT:=%s}"\n' "$API_PORT" "$UI_PORT" "$APP_PORT" >"$DEMO_DIR/ports.env"
 fi
 
 helm_flagsmith() {
@@ -120,6 +127,9 @@ for _ in $(seq 1 90); do
 done
 [[ "${ready:-0}" -ge 2 ]] || die "the FlagGuards in namespace shop were not checked within 90s; see: KUBECONFIG=.demo/kubeconfig bin/kubectl logs -n flagbreaker-system deployment/flagbreaker"
 "$KUBECTL" get flagguards -n shop
+shop="$APP_URL"
+curl -fsS -o /dev/null -m 3 "$APP_URL" 2>/dev/null ||
+  shop="not mapped on this cluster (it predates the shop page); recreate it with down.sh and up.sh"
 cat <<EOF
 
   Ready in $(($(date +%s) - started))s.
@@ -127,10 +137,12 @@ cat <<EOF
   Flagsmith dashboard: $UI_URL
   Log in as:           $FLAGSMITH_ADMIN_EMAIL
   Password:            $FLAGSMITH_ADMIN_PASSWORD
-  kubectl:             KUBECONFIG=.demo/kubeconfig bin/kubectl get flagguards -A
+  The shop:            $shop
 
+  Watch it live:       bash hack/demo/watch.sh      (flags, pods, guards and Feature Health, refreshed)
   Break it:            bash hack/demo/break.sh      (switches new_pricing on, as a person would)
   Fire an alert:       bash hack/demo/alert.sh fire (Grafana alert for express_checkout)
   Check everything:    bash hack/demo/e2e-all.sh
+  kubectl:             KUBECONFIG=.demo/kubeconfig bin/kubectl get flagguards -A
 
 EOF

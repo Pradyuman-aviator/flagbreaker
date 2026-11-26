@@ -31,11 +31,16 @@ CLUSTER_NAME="${CLUSTER_NAME:-flagbreaker-demo}"
 FLAGSMITH_NAMESPACE="flagsmith"
 FLAGSMITH_RELEASE="flagsmith"
 
-# Ports on your machine. kind maps them to NodePorts inside the cluster.
-API_PORT="${API_PORT:-8000}"
-UI_PORT="${UI_PORT:-8080}"
+# Ports on your machine. kind maps them to NodePorts inside the cluster, and
+# up.sh saves the ones a cluster was created with, so later scripts use them.
+# shellcheck disable=SC1091
+[[ -f "$DEMO_DIR/ports.env" ]] && source "$DEMO_DIR/ports.env"
+API_PORT="${API_PORT:-8000}" # Flagsmith API
+UI_PORT="${UI_PORT:-8080}"   # Flagsmith dashboard
+APP_PORT="${APP_PORT:-8090}" # the demo shop's page
 API_URL="http://localhost:${API_PORT}"
 UI_URL="http://localhost:${UI_PORT}"
+APP_URL="http://localhost:${APP_PORT}"
 
 case "$(uname -s)" in
   Linux*) OS=linux ;;
@@ -95,7 +100,12 @@ export KUBECONFIG
 KUBECONFIG="$(native_path "$DEMO_DIR/kubeconfig")"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+die() {
+  printf '\033[1;31merror:\033[0m %s\n' "$*" >&2
+  # On GitHub Actions, also as an annotation, which shows on the run's page.
+  [[ "${GITHUB_ACTIONS:-}" == true ]] && printf '::error::%s\n' "$*"
+  exit 1
+}
 
 require() {
   local missing=()

@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help tools test generate demo demo-break demo-alert demo-restore demo-test demo-down
+.PHONY: help tools test generate demo demo-watch demo-break demo-alert demo-restore demo-test demo-down
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -17,6 +17,9 @@ generate: ## Regenerate deepcopy code and the CRD from api/v1alpha1
 
 demo: ## Create a kind cluster with self-hosted Flagsmith, Flagbreaker and a demo app
 	bash hack/demo/up.sh
+
+demo-watch: ## A live terminal view of flags, pods, guards and Feature Health
+	bash hack/demo/watch.sh
 
 demo-break: ## Switch new_pricing on, as a person would, and watch Flagbreaker react
 	bash hack/demo/break.sh

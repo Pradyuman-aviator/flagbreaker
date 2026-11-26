@@ -45,6 +45,22 @@ spec:
             requests: {cpu: 5m, memory: 16Mi}
             limits: {memory: 64Mi}
 ---
+# The shop's page, on http://localhost:8090 (APP_PORT) through the kind
+# cluster's port mapping. It answers only while a checkout pod is ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: shop
+spec:
+  type: NodePort
+  selector: {app: checkout}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30082
+---
 # The full form, with every setting in reach: which flag the workload depends
 # on, in which Flagsmith environment, and when to trip.
 apiVersion: flagbreaker.dev/v1alpha1
