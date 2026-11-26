@@ -13,6 +13,11 @@ right after a flag is switched on, Flagbreaker:
 
 <!-- Demo video: add the link here. -->
 
+**No time to run it?** Each of these takes about a minute:
+- the demo video;
+- the [CI runs](https://github.com/Pradyuman-aviator/flagbreaker/actions/workflows/ci.yml). On every push to main and every pull request, an end-to-end job brings up kind, self-hosted Flagsmith and Flagbreaker from scratch, breaks the demo app and checks the recovery;
+- the [real incident timeline](#try-it) below.
+
 A flag flip changes production without a deploy:
 - **Rollout tools can't see it.** Argo Rollouts and Flagger watch new
   ReplicaSets, and a flag flip creates none.
@@ -34,11 +39,27 @@ your `~/.kube/config`.
 
 ```sh
 git clone https://github.com/Pradyuman-aviator/flagbreaker && cd flagbreaker
-bash hack/demo/up.sh        # kind + self-hosted Flagsmith + Flagbreaker + a demo app; ~8 min the first time
+bash hack/demo/up.sh        # kind + self-hosted Flagsmith + Flagbreaker + a demo shop; ~8 min the first time
+bash hack/demo/watch.sh     # in a second terminal: a live view of flags, pods, guards and Feature Health
 bash hack/demo/break.sh     # switch new_pricing on, the way a person would
-bash hack/demo/e2e-all.sh   # or run every scenario end to end (~3 min)
 bash hack/demo/down.sh      # delete it all
 ```
+
+Open three things side by side and watch one incident:
+- the Flagsmith dashboard, at http://localhost:8080;
+- the shop, at http://localhost:8090. It stops answering while the pods
+  crash and comes back on its own;
+- `watch.sh`, in a terminal.
+
+| Script | What it does |
+|---|---|
+| `hack/demo/up.sh` | Brings up everything. Safe to re-run. |
+| `hack/demo/watch.sh` | Live terminal view: what Flagsmith serves, the shop, the pods, each guard's phase and last step, and Feature Health. |
+| `hack/demo/break.sh [flag] [on\|off]` | Switches a flag the way a person would, with the admin's token, so Flagsmith records who did it. |
+| `hack/demo/alert.sh fire\|resolve` | Sends a Grafana / Alertmanager alert for `express_checkout` to Flagsmith. |
+| `hack/demo/restore.sh` | Asks Flagbreaker to put the flag back as it was. |
+| `hack/demo/e2e-all.sh` | Every scenario, checked end to end, in about 3 minutes: act mode with a restore, watch mode set from Flagsmith, and a Grafana alert. |
+| `hack/demo/down.sh` | Deletes the cluster and the local state. |
 
 `up.sh` builds the whole demo through Flagsmith's API, with no clicks in the
 dashboard:
@@ -48,11 +69,15 @@ dashboard:
 - Flagbreaker, from the Helm chart in this repo;
 - `checkout`, a small Go app that reads its flags with the Flagsmith SDK.
 
-At the end it prints the dashboard URL and an admin login. If ports 8000 and
-8080 are taken, run `API_PORT=18000 UI_PORT=18080 bash hack/demo/up.sh`.
+At the end it prints the dashboard URL and an admin login. If ports 8000, 8080
+or 8090 are taken, run `API_PORT=18000 UI_PORT=18080 APP_PORT=18090 bash hack/demo/up.sh`.
 
-What happens after `break.sh` comes from a real run on this demo. The times
-are UTC, from `kubectl get flagguard -n shop checkout-new-pricing -o yaml`:
+What happens after `break.sh`, from a real run on this demo. This is the
+"Timeline (UTC)" block of the flag's Health tab in Flagsmith; the FlagGuard's
+`status.timeline` holds the same steps.
+
+To see them yourself, run
+`KUBECONFIG=.demo/kubeconfig bin/kubectl get flagguard -n shop checkout-new-pricing -o yaml`.
 
 ```
 13:05:17  new_pricing was switched on in Production by admin@flagbreaker.local
@@ -62,8 +87,9 @@ are UTC, from `kubectl get flagguard -n shop checkout-new-pricing -o yaml`:
 13:05:42  Verified recovery: all 2 pods ready with no new crashes for 22s. Detected 2s after the change, switched off 0s after that, recovered 24s after the switch-off.
 ```
 
-The same timeline appears in Flagsmith, on the flag's **Health** tab. The flag
-also carries the **Unhealthy** tag for the length of the incident.
+For the length of the incident, the flag also carries the **Unhealthy** tag
+in Flagsmith's flag list. The demo sets `flagbreaker_mode` to `act`, so it
+switches the flag off; out of the box, Flagbreaker only watches.
 
 ## How Flagsmith is used
 
@@ -72,7 +98,7 @@ Flagbreaker has nothing to watch, nothing to switch and nowhere to report.
 
 | Flagsmith feature | What Flagbreaker does with it |
 |---|---|
-| Flags, through `/api/__future__/environments/{key}/features/{id}/` | Reads the flag. Switches off the environment default and every segment override that is on, in one versioned change. A restore turns them back on. |
+| Flags, through `/api/__future__/environments/{key}/features/{id}/` | Reads the flag. Switches off the environment default and every segment override that is on, in one versioned change; if Flagsmith refuses that, for example because of an experiment's override, one change per override. A restore turns them back on. |
 | Feature Health, Webhook provider | Reports Unhealthy and Healthy with the incident timeline, the failing pods and runbook links, which show in the flag's Health tab and as the Unhealthy tag. |
 | Feature Health events (the Grafana / Prometheus Alertmanager provider, or any other) | Trips on another provider's alert for the flag. Waits for the alert to clear before calling the workload recovered. Treats a person's **Dismiss** as an acknowledgement. |
 | Environment webhooks (`FLAG_UPDATED`, HMAC-SHA256 signed) | Learns exactly when a flag changed and who changed it. |
@@ -106,7 +132,7 @@ spec:
   workload: {kind: Deployment, name: checkout}
   window: 10m        # how long after a switch-on a breakage is blamed on it
   failingPods: 1     # how many pods must fail
-  stableFor: 30s     # how long the pods must stay healthy to count as recovered
+  stableFor: 30s     # how long the pods must stay healthy to count as recovered (the demo uses 20s)
   links:
     - {title: Runbook, url: "https://example.com/runbook"}
 ```
@@ -138,20 +164,32 @@ off pauses it everywhere.
   kubectl annotate flagguard -n shop checkout-new-pricing flagbreaker.dev/restore=$(date +%s) --overwrite
   ```
 
+  In the demo, `bash hack/demo/restore.sh` runs this for you.
+
 Either way the flag is watched again, and a second breakage trips the breaker
 again. The [runbook](docs/runbook.md) covers each step.
 
 ## Install in your cluster
 
+Build the image, push it to a registry your cluster pulls from (on kind, use
+`kind load docker-image` instead), and install the chart from this repo:
+
 ```sh
+docker build -t <registry>/flagbreaker:dev . && docker push <registry>/flagbreaker:dev
 kubectl apply --server-side -f charts/flagbreaker/crds/
-helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version 0.1.0 \
-  -n flagbreaker-system --create-namespace \
+helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-namespace \
+  --set image.repository=<registry>/flagbreaker --set image.tag=dev \
   --set flagsmith.url=http://flagsmith-api.flagsmith:8000 \
   --set flagsmith.apiKey=<organisation API key> \
   --set flagsmith.healthWebhookPath=/api/v1/feature-health/<path> \
   --set flagsmith.settingsEnvironmentKey=<environment holding the flagbreaker_* flags>
+kubectl annotate namespace <namespace> flagbreaker.dev/allowed-environments=<client-side environment key>
 ```
+
+Each tagged release also publishes multi-arch images and the chart to GHCR,
+through [release.yml](.github/workflows/release.yml). Once a release exists,
+`helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --version <version> …`
+replaces the first line and the local chart path.
 
 - **`healthWebhookPath`.** Create a Webhook provider under Project Settings
   → Feature Health, or call `POST /api/v1/projects/{id}/feature-health/providers/`
@@ -161,8 +199,6 @@ helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --ve
   - Point an environment webhook at `http://flagbreaker-webhook.flagbreaker-system.svc:8082/webhooks/flagsmith`.
   - Give it a secret, and pass the same secret as `flagsmith.webhookSecret`.
   - Add that host to Flagsmith's `SSRF_ALLOWED_HOSTS`.
-- **Building from source.** Run `docker build -t flagbreaker .`, then
-  `helm install … ./charts/flagbreaker --set image.repository=flagbreaker --set image.tag=latest`.
 - **More settings.** See [values.yaml](charts/flagbreaker/values.yaml).
 
 ## What's real and what's staged
@@ -181,8 +217,8 @@ helm install flagbreaker oci://ghcr.io/pradyuman-aviator/charts/flagbreaker --ve
 
 - **Argo Rollouts and Flagger** roll back deploys. A flag flip is not a deploy,
   so they never see it.
-  - If a rollout starts within 30 s of a flag change, Flagbreaker doesn't
-    blame the flag; it only reports.
+  - If the workload rolled out any time from 30 s before a flag change
+    onward, Flagbreaker doesn't blame the flag; it only reports.
 - **An Alertmanager rule** can already mark a flag Unhealthy through
   Flagsmith's Grafana provider, but nothing in open-source Flagsmith then
   switches the flag off. Flagbreaker acts on those alerts too.
@@ -209,10 +245,11 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 73 Go tests cover the rules, the client, webhook verification,
-  and whole incidents run through `Reconcile` against a fake Flagsmith. CI
-  runs them on every push, then brings up the demo on a fresh kind cluster
-  and runs every end-to-end scenario.
+- **Tests.** 81 Go tests cover the rules, the client, webhook verification,
+  and whole incidents run through `Reconcile` against a fake Flagsmith,
+  including one per bug that two independent code reviews found. On every
+  push to main and every pull request, CI runs them, plus an end-to-end job
+  that brings up the demo on a fresh kind cluster and runs every scenario.
 - **Where it has run.**
   - It has run end to end on Windows 11 (Git Bash, Docker Desktop) and on
     Ubuntu in CI.

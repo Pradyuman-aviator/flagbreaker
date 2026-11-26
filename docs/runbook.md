@@ -59,8 +59,9 @@ Fix the cause first. Then do one of these:
   flag change: if the workload breaks again, the breaker trips again.
 
 - **Switch it on in Flagsmith.** Flagbreaker watches it again as soon as it's
-  on. Segment overrides it switched off stay off; the FlagGuard's timeline
-  lists them, and the restore annotation still turns them back on.
+  on. Segment overrides it switched off stay off: the timeline says how many,
+  `status.snapshot.enabledSegmentOverrides` lists their segment IDs, and the
+  restore annotation still turns them back on.
 
 ## 5. Keep it from acting
 

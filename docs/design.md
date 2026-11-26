@@ -73,8 +73,10 @@ these holds:
 - **Pods**: the flag was switched on within `window` (10 minutes by default),
   and at least `failingPods` pods failed after that. A container that exited
   non-zero or was OOM-killed counts as failing, and so does a pod that was
-  ready and then stayed not ready for 20 s. A new pod that is slow to start
-  doesn't count, and neither do evicted pods.
+  ready and then stayed not ready for 20 s. A pod that is not ready within a
+  minute of being created, with no restarts, is still starting up and doesn't
+  count; evicted pods don't either. A workload that is still crash-looping
+  from before the change, however long its back-off, is never blamed on it.
 - **Alert**: another Feature Health provider has an Unhealthy event for this
   flag that started after the flag was switched on. It counts whether the
   event names this environment or no environment.
@@ -84,8 +86,9 @@ these holds:
 - A change made while the workload was already failing, in the minute
   before. Kubernetes keeps a container's last crash for a long time, so
   older crashes don't count.
-- A change made when a rollout started at the same time. The deploy may be
-  the cause, so the trip only reports and leaves the flag on.
+- A change near a rollout: if the workload rolled out any time from 30 s
+  before the change onward, the deploy may be the cause, so the trip only
+  reports and leaves the flag on.
 - A change a person acknowledged, by dismissing the incident in Flagsmith.
 - A change that already caused an incident. Each change is blamed once, so
   a workload that heals with the flag still on doesn't trip again.
@@ -175,8 +178,10 @@ feature-state endpoints return 400 under versioning v2.
   controller's cache. If writing the status fails after the flag was already
   switched off, the status is kept and written on the next check, so an
   incident is never forgotten.
-- **No silent no-ops.** Redirects are followed only for GET. Every
-  switch-off is checked against the flag state Flagsmith returns.
+- **No silent no-ops.** Redirects are followed only for GET. After every
+  switch-off, the environment default Flagsmith returns is checked to be off.
+  A switch-off that timed out is marked, so if Flagsmith applied it after all,
+  it is recorded as Flagbreaker's, not a person's.
 - **Deleting a guard mid-incident.** A finalizer clears its Unhealthy event
   and says that this isn't a verified recovery.
 - **Credentials.** The org API key and the Feature Health path live in a
@@ -230,7 +235,7 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
     that speaks the same HTTP API.
 - `bash hack/demo/e2e-all.sh` runs the same stories against the real thing:
   kind, the official Flagsmith Helm chart and the demo app. CI runs it on
-  every push.
+  every push to main and every pull request.
 
 ## Limitations
 
