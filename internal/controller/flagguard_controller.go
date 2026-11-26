@@ -274,6 +274,7 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		return fmt.Errorf("reading flag %q: %w", spec.Flag, err)
 	}
 	enabled := flag.EnvironmentDefault.Enabled
+	value := valueOf(flag.EnvironmentDefault.Value)
 
 	// 2. Look at the workload.
 	t, err := r.getTarget(ctx, guard.Namespace, spec.Workload)
@@ -287,11 +288,12 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	assessment := workload.Assess(pods, now, notReadyGrace)
 
 	// 3. Notice flag changes made by people. A switch-off during an
-	// incident is what watch mode asks a person to do, unless it is
-	// Flagbreaker's own, sent earlier and not confirmed (a timeout).
+	// incident, or a new value during one a value caused, is what watch mode
+	// asks a person to do, unless it is Flagbreaker's own, sent earlier and
+	// not confirmed (a timeout).
 	var personOff *v1alpha1.FlagChange
-	if change := r.trackFlag(guard, enabled, assessment, now); change != nil &&
-		!change.Enabled && st.Phase == v1alpha1.PhaseTripped && st.FlagDisabledAt == nil {
+	if change := r.trackFlag(guard, enabled, value, assessment, now); change != nil &&
+		st.Phase == v1alpha1.PhaseTripped && st.FlagDisabledAt == nil && mitigates(st.Trigger, change) {
 		if st.SwitchOffAttemptedAt != nil {
 			r.confirmSwitchOff(ctx, guard, spec, change.At.Time, assessment, now)
 		} else {
@@ -354,9 +356,11 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	}
 
 	// 7. Decide, then act.
+	valueIncident := isValueIncident(st)
 	in := breaker.Input{
 		Now: now, Phase: st.Phase, Mode: mode,
 		FlagEnabled: enabled, LastChange: st.LastFlagChange,
+		ValueIncident: valueIncident, NewValueServed: valueIncident && sameValue(&value, st.Trigger.Value),
 		Pods: assessment, DesiredReplicas: t.desired, RolloutStartedAt: rolloutAt,
 		Alerts: alerts, AlertsSince: alertsSince(guard), HandledEventID: st.HandledEventID, Dismissed: dismissed,
 		Window: spec.Window.Duration, StableFor: spec.StableFor.Duration, FailingPods: int(spec.FailingPods),
@@ -369,6 +373,9 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	case breaker.Trip:
 		return r.trip(ctx, guard, spec, t, flag, assessment, alerts, d, now)
 	case breaker.SwitchOff:
+		if valueIncident {
+			return r.putValueBack(ctx, guard, spec, flag, assessment, now)
+		}
 		return r.switchOff(ctx, guard, spec, flag, assessment, now)
 	case breaker.Recover:
 		return r.recover(ctx, guard, spec, assessment, d, now)
@@ -409,7 +416,9 @@ func alertsFrom(alerts []breaker.Alert, since time.Time) []breaker.Alert {
 // Flagsmith refused, such as an experiment's, are no longer in the snapshot.
 func (r *FlagGuardReconciler) retryLeftOnSegments(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, flag flagsmith.Flag, now time.Time) error {
 	st := &guard.Status
-	if st.Phase != v1alpha1.PhaseTripped || st.Mode != v1alpha1.ModeAct || st.FlagDisabledBy != ChangedByFlagbreaker || st.Snapshot == nil {
+	// A value incident switches nothing off; overrides in the snapshot are
+	// from an earlier incident and wait for a restore.
+	if st.Phase != v1alpha1.PhaseTripped || st.Mode != v1alpha1.ModeAct || st.FlagDisabledBy != ChangedByFlagbreaker || st.Snapshot == nil || isValueIncident(st) {
 		return nil
 	}
 	var stillOn []int64
@@ -463,16 +472,41 @@ func conditionTrue(conditions []metav1.Condition, kind string) bool {
 
 // confirmSwitchOff records a switch-off Flagbreaker sent but couldn't confirm
 // at the time (it timed out after Flagsmith applied it): the flag is off now,
-// and it was Flagbreaker's doing, not a person's.
+// or has its previous value back, and it was Flagbreaker's doing, not a
+// person's.
 func (r *FlagGuardReconciler) confirmSwitchOff(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, at time.Time, a workload.Assessment, now time.Time) {
 	st := &guard.Status
 	st.SwitchOffAttemptedAt = nil
 	st.FlagDisabledAt, st.FlagDisabledBy = metaNow(at), ChangedByFlagbreaker
+	if c := st.LastFlagChange; isValueIncident(st) && c != nil {
+		// Flagbreaker's own change is never blamed for a breakage.
+		c.ChangedBy, c.Tripped = ChangedByFlagbreaker, true
+		addTimeline(st, now, "ValueReverted",
+			fmt.Sprintf("Put %s's previous value back in %s; Flagsmith applied the earlier request that timed out.", spec.Flag, st.Environment))
+		metrics.ValueReverts.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "flagbreaker").Inc()
+		r.restartCrashed(ctx, guard, spec, a, now)
+		return
+	}
 	st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(at), Enabled: false, ChangedBy: ChangedByFlagbreaker}
 	addTimeline(st, now, "FlagSwitchedOff",
 		fmt.Sprintf("Switched %s off in %s; Flagsmith applied the earlier request that timed out. Identity overrides and experiments are not changed.", spec.Flag, st.Environment))
 	metrics.SwitchOffs.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "flagbreaker").Inc()
 	r.restartCrashed(ctx, guard, spec, a, now)
+}
+
+// isValueIncident reports whether the current incident was caused by a
+// change to the flag's value.
+func isValueIncident(st *v1alpha1.FlagGuardStatus) bool {
+	return st.Trigger != nil && st.Trigger.ValueChanged
+}
+
+// mitigates reports whether a change undoes what caused the incident: a
+// switch-off, or, for an incident a value caused, a different value.
+func mitigates(trigger, change *v1alpha1.FlagChange) bool {
+	if trigger != nil && trigger.ValueChanged {
+		return change.ValueChanged && !sameValue(change.Value, trigger.Value)
+	}
+	return !change.Enabled && !change.ValueChanged
 }
 
 // alertsSince is when an alert must have started to be about the flag as
@@ -496,10 +530,11 @@ func resetForNewFlag(st *v1alpha1.FlagGuardStatus, spec v1alpha1.FlagGuardSpec, 
 	addTimeline(st, now, "GuardChanged", msg)
 }
 
-// trackFlag records a change to the flag's environment default and returns
-// it, or nil when nothing changed. The first time a guard looks, it only
-// remembers the state: a flag that was already on is never blamed.
-func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool, a workload.Assessment, now time.Time) *v1alpha1.FlagChange {
+// trackFlag records a change to the flag's environment default, a switch or
+// a new value, and returns it, or nil when nothing changed. The first time a
+// guard looks, it only remembers the state: a flag that was already on, or
+// already had its value, is never blamed.
+func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool, value v1alpha1.FlagValue, a workload.Assessment, now time.Time) *v1alpha1.FlagChange {
 	st := &guard.Status
 	key := client.ObjectKeyFromObject(guard)
 
@@ -509,19 +544,31 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 	r.mu.Unlock()
 
 	if st.FlagEnabled == nil {
-		st.FlagEnabled = &enabled
+		v := value
+		st.FlagEnabled, st.FlagValue = &enabled, &v
 		return nil
 	}
-	if *st.FlagEnabled == enabled {
+	if st.FlagValue == nil {
+		// A guard from before Flagbreaker tracked values: remember this one.
+		v := value
+		st.FlagValue = &v
+	}
+	switched := *st.FlagEnabled != enabled
+	if !switched && sameValue(st.FlagValue, &value) {
 		r.enrich(guard, a)
 		return nil
 	}
-	st.FlagEnabled = &enabled
+	old, current := *st.FlagValue, value
+	st.FlagEnabled, st.FlagValue = &enabled, &current
 
 	// The change happened after the previous check, which may be long ago
 	// if checks failed in between. If the webhook is already here, it says
 	// exactly when, and who made it.
 	change := &v1alpha1.FlagChange{At: metav1.NewTime(prev), Enabled: enabled}
+	if !switched {
+		v := value
+		change.ValueChanged, change.Value, change.PreviousValue = true, &v, &old
+	}
 	if !seen {
 		// The first check since Flagbreaker started: the change happened
 		// while it wasn't running, at a time it can't know.
@@ -531,14 +578,52 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 	if !seen {
 		from = now.Add(-recentWebhook)
 	}
-	if c, ok := r.Changes.Latest(st.EnvironmentID, st.FeatureID, enabled); ok && matches(c, from, now, r.SyncPeriod) {
+	if c, ok := r.webhookFor(st, change); ok && matches(c, from, now, r.SyncPeriod) {
 		change.At, change.ChangedBy, change.TimeUnknown = metav1.NewTime(c.At), c.ChangedBy, false
 	}
 	// Was it failing just before? Old crashes stay in pod status long after
 	// a pod recovers, so look back only a little.
-	change.WorkloadWasFailing = enabled && wasFailing(a, change.At.Time, failingFrom(st, withDefaults(guard.Spec), change.At.Time))
+	blamable := enabled || change.ValueChanged
+	change.WorkloadWasFailing = blamable && wasFailing(a, change.At.Time, failingFrom(st, withDefaults(guard.Spec), change.At.Time))
 	st.LastFlagChange = change
 	return change
+}
+
+// webhookFor finds the webhook that reported a change polling saw: the latest
+// switch to the same state, or the latest value edit. A value edit reported
+// at or after Flagbreaker put a value back may be Flagbreaker's own, so it is
+// not used to name who made the change.
+func (r *FlagGuardReconciler) webhookFor(st *v1alpha1.FlagGuardStatus, c *v1alpha1.FlagChange) (changes.Change, bool) {
+	if !c.ValueChanged {
+		return r.Changes.Latest(st.EnvironmentID, st.FeatureID, c.Enabled)
+	}
+	w, ok := r.Changes.LatestValue(st.EnvironmentID, st.FeatureID)
+	if !ok || w.ChangedBy == ChangedByFlagbreaker {
+		return w, false
+	}
+	if st.FlagDisabledBy == ChangedByFlagbreaker && st.FlagDisabledAt != nil && !w.At.Before(st.FlagDisabledAt.Time) {
+		return w, false
+	}
+	return w, true
+}
+
+// valueOf turns a Flagsmith value into the API's FlagValue; no value is the
+// zero FlagValue.
+func valueOf(v *flagsmith.Value) v1alpha1.FlagValue {
+	if v == nil {
+		return v1alpha1.FlagValue{}
+	}
+	return v1alpha1.FlagValue{Type: v.Type, Value: v.Value}
+}
+
+func sameValue(a, b *v1alpha1.FlagValue) bool {
+	conv := func(v *v1alpha1.FlagValue) *flagsmith.Value {
+		if v == nil {
+			return nil
+		}
+		return &flagsmith.Value{Type: v.Type, Value: v.Value}
+	}
+	return flagsmith.SameValue(conv(a), conv(b))
 }
 
 // enrich adds a webhook's exact time and author to a change that polling saw
@@ -549,16 +634,16 @@ func (r *FlagGuardReconciler) enrich(guard *v1alpha1.FlagGuard, a workload.Asses
 	// A change first seen after a restart gets its real time from a webhook;
 	// whether the workload was failing before it is then checked again.
 	if c := st.LastFlagChange; c != nil && c.TimeUnknown {
-		if w, ok := r.Changes.Latest(st.EnvironmentID, st.FeatureID, c.Enabled); ok && matches(w, c.At.Add(-recentWebhook), c.At.Add(r.SyncPeriod), r.SyncPeriod) {
+		if w, ok := r.webhookFor(st, c); ok && matches(w, c.At.Add(-recentWebhook), c.At.Add(r.SyncPeriod), r.SyncPeriod) {
 			c.At, c.ChangedBy, c.TimeUnknown = metav1.NewTime(w.At), w.ChangedBy, false
-			c.WorkloadWasFailing = c.Enabled && wasFailing(a, c.At.Time, failingFrom(st, withDefaults(guard.Spec), c.At.Time))
+			c.WorkloadWasFailing = (c.Enabled || c.ValueChanged) && wasFailing(a, c.At.Time, failingFrom(st, withDefaults(guard.Spec), c.At.Time))
 		}
 	}
 	for _, c := range []*v1alpha1.FlagChange{st.LastFlagChange, st.Trigger} {
 		if c == nil || c.ChangedBy != "" || c.TimeUnknown {
 			continue
 		}
-		w, ok := r.Changes.Latest(st.EnvironmentID, st.FeatureID, c.Enabled)
+		w, ok := r.webhookFor(st, c)
 		if !ok || w.ChangedBy == "" || !matches(w, c.At.Time, c.At.Time.Add(r.SyncPeriod), r.SyncPeriod) {
 			continue
 		}
@@ -568,12 +653,16 @@ func (r *FlagGuardReconciler) enrich(guard *v1alpha1.FlagGuard, a workload.Asses
 		st.Timeline[0].Time = st.Trigger.At
 		st.Timeline[0].Message = describeChange(guard.Spec.Flag, st.Environment, st.Trigger)
 	}
-	// A person's switch-off during an incident gets its author too.
-	if c := st.LastFlagChange; st.FlagDisabledAt != nil && st.FlagDisabledBy == "" && c != nil && !c.Enabled && c.ChangedBy != "" {
+	// A person's switch-off (or new value) during an incident gets its
+	// author too.
+	if c := st.LastFlagChange; st.FlagDisabledAt != nil && st.FlagDisabledBy == "" && c != nil && c.ChangedBy != "" && mitigates(st.Trigger, c) {
 		st.FlagDisabledBy = c.ChangedBy
 		for i := range st.Timeline {
-			if st.Timeline[i].Event == "FlagSwitchedOffByPerson" {
+			switch st.Timeline[i].Event {
+			case "FlagSwitchedOffByPerson":
 				st.Timeline[i].Message = personSwitchOffMessage(guard.Spec.Flag, st.Environment, c.ChangedBy)
+			case "ValueChangedByPerson":
+				st.Timeline[i].Message = personValueMessage(guard.Spec.Flag, st.Environment, c)
 			}
 		}
 	}
@@ -620,9 +709,10 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 		}
 	}
 	// A change is blamed for one incident only, so a workload that heals
-	// with the flag still on (watch mode) isn't tripped again by it.
-	if st.LastFlagChange != nil && st.LastFlagChange.Enabled {
-		st.LastFlagChange.Tripped = true
+	// with the flag still on, or the new value still in place (watch mode),
+	// isn't tripped again by it.
+	if c := st.LastFlagChange; c != nil && (c.Enabled || c.ValueChanged) {
+		c.Tripped = true
 	}
 	if d.Cause == breaker.CauseAlert {
 		addTimeline(st, now, "Tripped", fmt.Sprintf("Tripped for %s %s/%s: %s", t.kind, guard.Namespace, t.obj.GetName(), d.Why))
@@ -633,13 +723,71 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 	metrics.Trips.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, string(d.Mode), string(d.Cause)).Inc()
 
 	var err error
-	if d.Mode == v1alpha1.ModeAct {
+	switch {
+	case d.Mode == v1alpha1.ModeAct && isValueIncident(st):
+		err = r.putValueBack(ctx, guard, spec, flag, a, now)
+	case d.Mode == v1alpha1.ModeAct:
 		err = r.switchOff(ctx, guard, spec, flag, a, now)
-	} else if d.ModeReason == "" {
+	case d.ModeReason == "" && isValueIncident(st):
+		addTimeline(st, now, "WatchOnly", fmt.Sprintf("Watch mode (%s): the new value was left in place. Put %s's previous value back in Flagsmith to recover.", st.ModeReason, spec.Flag))
+	case d.ModeReason == "":
 		addTimeline(st, now, "WatchOnly", fmt.Sprintf("Watch mode (%s): the flag was left on. Switch %s off in Flagsmith to recover.", st.ModeReason, spec.Flag))
 	}
 	r.report(ctx, guard, spec, flagsmith.Unhealthy, a)
 	return err
+}
+
+// putValueBack undoes the value change that caused the incident: it sets
+// the environment default's value back to what it was, and leaves whether
+// the flag is on alone. Many apps read a remote config value whether or not
+// the flag is on, so switching the flag off wouldn't help them.
+func (r *FlagGuardReconciler) putValueBack(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec,
+	flag flagsmith.Flag, a workload.Assessment, now time.Time) error {
+	st := &guard.Status
+	trigger := st.Trigger
+	if current := valueOf(flag.EnvironmentDefault.Value); !sameValue(&current, trigger.Value) {
+		return nil // someone changed it again since; their change stands
+	}
+	previous := v1alpha1.FlagValue{}
+	if trigger.PreviousValue != nil {
+		previous = *trigger.PreviousValue
+	}
+
+	// Marked before sending, as for a switch-off: if the request times out
+	// after Flagsmith applied it, the next check knows it was Flagbreaker's.
+	st.SwitchOffAttemptedAt = metaNow(now)
+	_, err := r.Flagsmith.SetValue(ctx, spec.EnvironmentKey, st.FeatureID, flagsmith.Value{Type: previous.Type, Value: previous.Value})
+	switch {
+	case errors.Is(err, flagsmith.ErrChangeRequestsEnabled):
+		st.SwitchOffAttemptedAt = nil
+		st.Mode = v1alpha1.ModeWatch
+		st.ModeReason = st.Environment + " requires change requests"
+		setCondition(guard, conditionBlocked, metav1.ConditionTrue, "ChangeRequestsEnabled",
+			fmt.Sprintf("%s requires change requests, so Flagbreaker won't change flags there", st.Environment))
+		addTimeline(st, now, "BlockedByChangeRequests",
+			fmt.Sprintf("%s requires change requests, so Flagbreaker left the new value in place. Approve a change request to put the previous value back.", st.Environment))
+		return nil
+	case err != nil:
+		return fmt.Errorf("putting %q's previous value back: %w", spec.Flag, err)
+	}
+
+	st.SwitchOffAttemptedAt = nil
+	st.FlagValue = &previous
+	st.FlagDisabledAt, st.FlagDisabledBy = metaNow(now), ChangedByFlagbreaker
+	// Flagbreaker's own change is never blamed for a breakage: one after it
+	// belongs to this incident, and blaming it would put the bad value back.
+	bad := *trigger.Value
+	st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: flag.EnvironmentDefault.Enabled, ValueChanged: true,
+		Value: &previous, PreviousValue: &bad, ChangedBy: ChangedByFlagbreaker, Tripped: true}
+	addTimeline(st, now, "ValueReverted", fmt.Sprintf("Put %s's previous value back in %s: %s instead of %s. Whether the flag is on is unchanged.",
+		spec.Flag, st.Environment, showValue(previous), showValue(bad)))
+	r.Recorder.Eventf(guard, nil, corev1.EventTypeNormal, "ValueReverted", "Revert", "Put %s's previous value back in %s", spec.Flag, st.Environment)
+	metrics.ValueReverts.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "flagbreaker").Inc()
+	if st.TrippedAt != nil {
+		metrics.Observe(metrics.SwitchOffSeconds, now.Sub(st.TrippedAt.Time), spec.Flag, st.Environment)
+	}
+	r.restartCrashed(ctx, guard, spec, a, now)
+	return nil
 }
 
 // switchOff turns off the flag's environment default and its segment
@@ -751,9 +899,15 @@ func (r *FlagGuardReconciler) personSwitchedOff(ctx context.Context, guard *v1al
 	st := &guard.Status
 	at := change.At
 	st.FlagDisabledAt, st.FlagDisabledBy = &at, change.ChangedBy
-	addTimeline(st, at.Time, "FlagSwitchedOffByPerson", personSwitchOffMessage(spec.Flag, st.Environment, change.ChangedBy))
-	r.Recorder.Eventf(guard, nil, corev1.EventTypeNormal, "FlagSwitchedOff", "SwitchOff", "%s was switched off in %s by a person", spec.Flag, st.Environment)
-	metrics.SwitchOffs.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "person").Inc()
+	if change.ValueChanged {
+		addTimeline(st, at.Time, "ValueChangedByPerson", personValueMessage(spec.Flag, st.Environment, change))
+		r.Recorder.Eventf(guard, nil, corev1.EventTypeNormal, "ValueChanged", "Revert", "%s's value was changed in %s by a person", spec.Flag, st.Environment)
+		metrics.ValueReverts.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "person").Inc()
+	} else {
+		addTimeline(st, at.Time, "FlagSwitchedOffByPerson", personSwitchOffMessage(spec.Flag, st.Environment, change.ChangedBy))
+		r.Recorder.Eventf(guard, nil, corev1.EventTypeNormal, "FlagSwitchedOff", "SwitchOff", "%s was switched off in %s by a person", spec.Flag, st.Environment)
+		metrics.SwitchOffs.WithLabelValues(guard.Namespace, guard.Name, spec.Flag, st.Environment, "person").Inc()
+	}
 	if st.TrippedAt != nil {
 		metrics.Observe(metrics.SwitchOffSeconds, at.Sub(st.TrippedAt.Time), spec.Flag, st.Environment)
 	}
@@ -767,6 +921,18 @@ func personSwitchOffMessage(flag, environment, by string) string {
 		by = "a person"
 	}
 	return fmt.Sprintf("%s was switched off in %s by %s", flag, environment, by)
+}
+
+func personValueMessage(flag, environment string, c *v1alpha1.FlagChange) string {
+	by := c.ChangedBy
+	if by == "" {
+		by = "a person"
+	}
+	s := fmt.Sprintf("%s's value was changed in %s by %s", flag, environment, by)
+	if c.Value != nil {
+		s += " to " + showValue(*c.Value)
+	}
+	return s
 }
 
 // restartCrashed deletes the pods that crashed after the triggering change,
@@ -864,7 +1030,9 @@ func (r *FlagGuardReconciler) rearm(ctx context.Context, guard *v1alpha1.FlagGua
 	st.SwitchOffAttemptedAt = nil
 	st.Phase = v1alpha1.PhaseArmed
 	st.TrippedAt, st.FlagDisabledAt, st.FlagDisabledBy, st.HealthySince, st.RecoveredAt = nil, nil, "", nil, nil
-	st.Trigger, st.Alert = nil, nil
+	// The trigger and the alert are cleared last: the Healthy report below
+	// still says what the incident was about.
+	defer func() { st.Trigger, st.Alert = nil, nil }()
 	meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
 	addTimeline(st, now, "Rearmed", strings.ToUpper(d.Why[:1])+d.Why[1:])
 	// A person turned the environment default on by hand. Overrides that

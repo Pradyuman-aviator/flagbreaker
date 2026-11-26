@@ -24,6 +24,13 @@ var (
 		Help: "Flags switched off during an incident, by Flagbreaker or a person.",
 	}, []string{"namespace", "guard", "flag", "environment", "by"})
 
+	// ValueReverts counts flags whose previous value was put back during an
+	// incident a value change caused, by who did it.
+	ValueReverts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flagbreaker_value_reverts_total",
+		Help: "Flag values changed back during an incident a value change caused, by Flagbreaker or a person.",
+	}, []string{"namespace", "guard", "flag", "environment", "by"})
+
 	// Recoveries counts verified recoveries.
 	Recoveries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "flagbreaker_recoveries_total",
@@ -54,7 +61,7 @@ var (
 	// SwitchOffSeconds measures the time from the trip to the switch-off.
 	SwitchOffSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "flagbreaker_switch_off_seconds",
-		Help:    "Seconds from the trip to the flag being switched off.",
+		Help:    "Seconds from the trip to the flag being switched off, or its previous value put back.",
 		Buckets: buckets,
 	}, []string{"flag", "environment"})
 
@@ -74,7 +81,7 @@ var (
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(Trips, SwitchOffs, Recoveries, Restores, Errors,
+	crmetrics.Registry.MustRegister(Trips, SwitchOffs, ValueReverts, Recoveries, Restores, Errors,
 		DetectionSeconds, SwitchOffSeconds, RecoverySeconds, Phase)
 }
 
@@ -103,6 +110,7 @@ func Forget(namespace, guard string) {
 	Phase.DeletePartialMatch(labels)
 	Trips.DeletePartialMatch(labels)
 	SwitchOffs.DeletePartialMatch(labels)
+	ValueReverts.DeletePartialMatch(labels)
 	Recoveries.DeletePartialMatch(labels)
 	Restores.DeletePartialMatch(labels)
 	Errors.DeletePartialMatch(labels)

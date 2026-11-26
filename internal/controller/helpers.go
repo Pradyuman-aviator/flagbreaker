@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,16 @@ func addTimeline(st *v1alpha1.FlagGuardStatus, at time.Time, event, message stri
 }
 
 func describeChange(flag, environment string, c *v1alpha1.FlagChange) string {
+	if c.ValueChanged {
+		s := fmt.Sprintf("%s's value was changed in %s", flag, environment)
+		if c.ChangedBy != "" {
+			s += " by " + c.ChangedBy
+		}
+		if c.PreviousValue != nil && c.Value != nil {
+			s += fmt.Sprintf(", from %s to %s", showValue(*c.PreviousValue), showValue(*c.Value))
+		}
+		return s
+	}
 	onOff := "off"
 	if c.Enabled {
 		onOff = "on"
@@ -67,6 +78,18 @@ func describeChange(flag, environment string, c *v1alpha1.FlagChange) string {
 		s += " by " + c.ChangedBy
 	}
 	return s
+}
+
+// showValue quotes a flag value for a message, shortened if it is long.
+func showValue(v v1alpha1.FlagValue) string {
+	if v.Type == "" {
+		return "no value"
+	}
+	s := v.Value
+	if r := []rune(s); len(r) > 60 {
+		s = string(r[:57]) + "..."
+	}
+	return strconv.Quote(s)
 }
 
 // timings measures the incident: from the flag change (or the alert) to the
@@ -85,15 +108,31 @@ func timings(st *v1alpha1.FlagGuardStatus) string {
 	if st.TrippedAt != nil && !startedAt.IsZero() {
 		parts = append(parts, fmt.Sprintf("detected %s after %s", seconds(st.TrippedAt.Sub(startedAt)), cause))
 	}
+	value := st.Trigger != nil && st.Trigger.ValueChanged
 	if st.FlagDisabledAt != nil && st.TrippedAt != nil {
 		by := ""
 		if st.FlagDisabledBy != "" && st.FlagDisabledBy != ChangedByFlagbreaker {
 			by = " by " + st.FlagDisabledBy
 		}
-		parts = append(parts, fmt.Sprintf("switched off%s %s after that", by, seconds(st.FlagDisabledAt.Sub(st.TrippedAt.Time))))
+		ownFix := st.FlagDisabledBy == ChangedByFlagbreaker
+		did := "switched off"
+		switch {
+		case value && ownFix:
+			did = "previous value put back"
+		case value:
+			did = "value changed"
+		}
+		parts = append(parts, fmt.Sprintf("%s%s %s after that", did, by, seconds(st.FlagDisabledAt.Sub(st.TrippedAt.Time))))
 	}
 	if st.RecoveredAt != nil && st.FlagDisabledAt != nil {
-		parts = append(parts, fmt.Sprintf("recovered %s after the switch-off", seconds(st.RecoveredAt.Sub(st.FlagDisabledAt.Time))))
+		after := "the switch-off"
+		switch {
+		case value && st.FlagDisabledBy == ChangedByFlagbreaker:
+			after = "the value was put back"
+		case value:
+			after = "the value changed"
+		}
+		parts = append(parts, fmt.Sprintf("recovered %s after %s", seconds(st.RecoveredAt.Sub(st.FlagDisabledAt.Time)), after))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -147,12 +186,19 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 	}
 	title := fmt.Sprintf("%s%s %s/%s", eventTitlePrefix, kind, guard.Namespace, guard.Spec.Workload.Name)
 
+	value := st.Trigger != nil && st.Trigger.ValueChanged
 	cause := "The workload broke after this flag changed"
-	if st.Alert != nil {
+	switch {
+	case st.Alert != nil:
 		cause = fmt.Sprintf("%s reported %q for this flag", st.Alert.Provider, st.Alert.Title)
+	case value:
+		cause = "The workload broke after this flag's value changed"
 	}
 	var summary string
 	switch {
+	case status == flagsmith.Healthy && st.Phase == v1alpha1.PhaseArmed && value:
+		summary = "A person set the new value again before Flagbreaker verified recovery, so Flagbreaker is watching the flag again. " +
+			"This is not a verified recovery: if the workload breaks again, the breaker trips again."
 	case status == flagsmith.Healthy && st.Phase == v1alpha1.PhaseArmed:
 		summary = "A person turned the flag back on before Flagbreaker verified recovery, so Flagbreaker is watching it again. " +
 			"This is not a verified recovery: if the workload breaks again, the breaker trips again."
@@ -164,10 +210,16 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 		if st.Snapshot != nil {
 			summary += " " + restoreHint(guard) + ". Switching the flag on in Flagsmith works too; Flagbreaker watches it again as soon as it is on."
 		}
+	case st.FlagDisabledAt != nil && st.FlagDisabledBy == ChangedByFlagbreaker && value:
+		summary = cause + ", so Flagbreaker put the previous value back. Whether the flag is on is unchanged."
 	case st.FlagDisabledAt != nil && st.FlagDisabledBy == ChangedByFlagbreaker:
 		summary = cause + ", so Flagbreaker switched the flag off."
+	case st.FlagDisabledAt != nil && value:
+		summary = cause + ". Its value was changed by " + orA(st.FlagDisabledBy) + "; Flagbreaker is waiting for the workload to recover."
 	case st.FlagDisabledAt != nil:
 		summary = cause + ". It was switched off by " + orA(st.FlagDisabledBy) + "; Flagbreaker is waiting for the workload to recover."
+	case value:
+		summary = fmt.Sprintf("%s. Flagbreaker is in watch mode (%s), so the new value is still in place.", cause, st.ModeReason)
 	default:
 		summary = fmt.Sprintf("%s. Flagbreaker is in watch mode (%s), so the flag is still on.", cause, st.ModeReason)
 	}

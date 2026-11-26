@@ -47,6 +47,7 @@ const (
 type fakeFlagsmith struct {
 	mu        sync.Mutex
 	def       bool
+	value     *flagsmith.Value
 	segments  map[int64]bool
 	conflict  bool
 	patches   int
@@ -85,7 +86,8 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var body struct {
 			Default *struct {
-				Enabled bool `json:"enabled"`
+				Enabled *bool           `json:"enabled"`
+				Value   json.RawMessage `json:"value"`
 			} `json:"environment_default"`
 			Segments []struct {
 				Segment struct{ ID int64 } `json:"segment"`
@@ -101,8 +103,19 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		f.patches++
-		if body.Default != nil {
-			f.def = body.Default.Enabled
+		if d := body.Default; d != nil {
+			// As in Flagsmith: what isn't sent is left alone, and a null
+			// value clears it.
+			if d.Enabled != nil {
+				f.def = *d.Enabled
+			}
+			if len(d.Value) > 0 {
+				f.value = nil
+				if string(d.Value) != "null" {
+					f.value = &flagsmith.Value{}
+					_ = json.Unmarshal(d.Value, f.value)
+				}
+			}
 		}
 		for _, s := range body.Segments {
 			f.segments[s.Segment.ID] = s.Enabled // Flagsmith creates missing overrides too
@@ -135,7 +148,7 @@ func (f *fakeFlagsmith) flagJSON() map[string]any {
 	for _, id := range ids {
 		overrides = append(overrides, map[string]any{"segment": map[string]any{"id": id}, "enabled": f.segments[id], "priority": 0})
 	}
-	return map[string]any{"environment_default": map[string]any{"enabled": f.def}, "segment_overrides": overrides}
+	return map[string]any{"environment_default": map[string]any{"enabled": f.def, "value": f.value}, "segment_overrides": overrides}
 }
 
 func (f *fakeFlagsmith) addEvent(provider, externalID, typ string, blocks []flagsmith.TextBlock) {
