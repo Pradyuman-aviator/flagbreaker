@@ -110,6 +110,15 @@ type WorkloadReference struct {
 	Name string `json:"name"`
 }
 
+// AllowedEnvironmentsAnnotation goes on a Namespace. It lists, comma
+// separated, the client-side keys of the Flagsmith environments that
+// FlagGuards in that namespace may act on, or "*" for any. Flagbreaker acts
+// with an organisation API key, so without this a user who can create a
+// FlagGuard anywhere could switch off any flag; namespaces are cluster-scoped,
+// so only a cluster admin can grant it. The controller's
+// --require-namespace-opt-in=false turns the check off.
+const AllowedEnvironmentsAnnotation = "flagbreaker.dev/allowed-environments"
+
 // RestoreAnnotation asks Flagbreaker to undo its switch-off: set it on a
 // FlagGuard (any new value, such as a timestamp) once the cause is fixed.
 // Flagbreaker turns the environment default and the segment overrides it
@@ -135,6 +144,15 @@ type FlagChange struct {
 	// caused, in Flagsmith's Health tab. The change is not blamed again.
 	// +optional
 	Acknowledged bool `json:"acknowledged,omitempty"`
+	// Tripped is true once this change has caused an incident. A change is
+	// blamed for one incident only.
+	// +optional
+	Tripped bool `json:"tripped,omitempty"`
+	// TimeUnknown is true when Flagbreaker wasn't running when the flag
+	// changed, so it can't tell when. Such a change is not blamed unless a
+	// Flagsmith webhook later says exactly when it happened.
+	// +optional
+	TimeUnknown bool `json:"timeUnknown,omitempty"`
 }
 
 // FlagSnapshot is what the flag served before Flagbreaker switched it off.
@@ -226,6 +244,11 @@ type FlagGuardStatus struct {
 	// again.
 	// +optional
 	HandledEventID int64 `json:"handledEventID,omitempty"`
+
+	// ReportedEventID is the ID of the Unhealthy event Flagbreaker reported
+	// for the current incident. A dismissal is any newer event in its slot.
+	// +optional
+	ReportedEventID int64 `json:"reportedEventID,omitempty"`
 
 	// TrippedAt is when the breaker tripped.
 	// +optional

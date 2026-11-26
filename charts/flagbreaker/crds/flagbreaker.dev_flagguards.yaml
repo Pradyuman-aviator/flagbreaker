@@ -314,6 +314,17 @@ spec:
                   enabled:
                     description: Enabled is what the flag serves after the change.
                     type: boolean
+                  timeUnknown:
+                    description: |-
+                      TimeUnknown is true when Flagbreaker wasn't running when the flag
+                      changed, so it can't tell when. Such a change is not blamed unless a
+                      Flagsmith webhook later says exactly when it happened.
+                    type: boolean
+                  tripped:
+                    description: |-
+                      Tripped is true once this change has caused an incident. A change is
+                      blamed for one incident only.
+                    type: boolean
                   workloadWasFailing:
                     description: |-
                       WorkloadWasFailing is true when the workload was already failing
@@ -350,6 +361,12 @@ spec:
                   again.
                 format: date-time
                 type: string
+              reportedEventID:
+                description: |-
+                  ReportedEventID is the ID of the Unhealthy event Flagbreaker reported
+                  for the current incident. A dismissal is any newer event in its slot.
+                format: int64
+                type: integer
               restoreRequest:
                 description: |-
                   RestoreRequest is the last value of the flagbreaker.dev/restore
@@ -417,6 +434,17 @@ spec:
                     type: string
                   enabled:
                     description: Enabled is what the flag serves after the change.
+                    type: boolean
+                  timeUnknown:
+                    description: |-
+                      TimeUnknown is true when Flagbreaker wasn't running when the flag
+                      changed, so it can't tell when. Such a change is not blamed unless a
+                      Flagsmith webhook later says exactly when it happened.
+                    type: boolean
+                  tripped:
+                    description: |-
+                      Tripped is true once this change has caused an incident. A change is
+                      blamed for one incident only.
                     type: boolean
                   workloadWasFailing:
                     description: |-
