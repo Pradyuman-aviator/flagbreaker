@@ -152,15 +152,27 @@ func (c *Client) SwitchOff(ctx context.Context, environmentKey string, featureID
 	return c.UpdateFlag(ctx, environmentKey, featureID, Update{Default: &off, Segments: segmentIDs})
 }
 
-// Update is a change to a flag's enabled state.
+// Update is a change to a flag's enabled state or value.
 type Update struct {
 	// Default, when set, is the new enabled state of the environment default.
 	Default *bool
+	// Value, when set, is the environment default's new value. A Value with
+	// an empty Type clears the value.
+	Value *Value
 	// Segments are the segment overrides to change. Flagsmith creates an
 	// override that doesn't exist, so list only existing ones.
 	Segments []int64
 	// SegmentsEnabled is the new enabled state of those overrides.
 	SegmentsEnabled bool
+}
+
+// SameValue reports whether two values are the same; nil and a Value with an
+// empty Type both mean no value.
+func SameValue(a, b *Value) bool {
+	if a == nil || a.Type == "" {
+		return b == nil || b.Type == ""
+	}
+	return b != nil && a.Type == b.Type && a.Value == b.Value
 }
 
 // UpdateFlag applies an Update in one versioned change. Anything it doesn't
@@ -174,14 +186,26 @@ func (c *Client) UpdateFlag(ctx context.Context, environmentKey string, featureI
 		Enabled bool       `json:"enabled"`
 	}
 	type state struct {
-		Enabled bool `json:"enabled"`
+		Enabled *bool `json:"enabled,omitempty"`
+		// "null" clears the value; nothing leaves it alone.
+		Value json.RawMessage `json:"value,omitempty"`
 	}
 	body := struct {
 		EnvironmentDefault *state           `json:"environment_default,omitempty"`
 		SegmentOverrides   []overrideChange `json:"segment_overrides,omitempty"`
 	}{}
-	if u.Default != nil {
-		body.EnvironmentDefault = &state{Enabled: *u.Default}
+	if u.Default != nil || u.Value != nil {
+		body.EnvironmentDefault = &state{Enabled: u.Default}
+	}
+	if u.Value != nil {
+		body.EnvironmentDefault.Value = json.RawMessage("null")
+		if u.Value.Type != "" {
+			data, err := json.Marshal(u.Value)
+			if err != nil {
+				return Flag{}, err
+			}
+			body.EnvironmentDefault.Value = data
+		}
 	}
 	for _, id := range u.Segments {
 		body.SegmentOverrides = append(body.SegmentOverrides, overrideChange{Segment: segmentRef{ID: id}, Enabled: u.SegmentsEnabled})
@@ -194,7 +218,16 @@ func (c *Client) UpdateFlag(ctx context.Context, environmentKey string, featureI
 	if u.Default != nil && flag.EnvironmentDefault.Enabled != *u.Default {
 		return flag, fmt.Errorf("PATCH %s: Flagsmith answered, but the environment default is still enabled=%v", flagPath(environmentKey, featureID), flag.EnvironmentDefault.Enabled)
 	}
+	if u.Value != nil && !SameValue(flag.EnvironmentDefault.Value, u.Value) {
+		return flag, fmt.Errorf("PATCH %s: Flagsmith answered, but the environment default doesn't have the value Flagbreaker sent", flagPath(environmentKey, featureID))
+	}
 	return flag, nil
+}
+
+// SetValue sets the environment default's value, leaving whether the flag is
+// on alone. A Value with an empty Type clears it.
+func (c *Client) SetValue(ctx context.Context, environmentKey string, featureID int64, v Value) (Flag, error) {
+	return c.UpdateFlag(ctx, environmentKey, featureID, Update{Value: &v})
 }
 
 // HealthStatus is a Feature Health status.

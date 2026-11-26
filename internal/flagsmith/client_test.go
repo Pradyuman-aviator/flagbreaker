@@ -61,6 +61,43 @@ func TestSwitchOffPatchesDefaultAndSegments(t *testing.T) {
 	}
 }
 
+func TestSetValueSendsOnlyTheValue(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		// No "enabled": putting a value back must not switch the flag.
+		want := `{"environment_default":{"value":{"type":"string","value":"{\"tax_rate\": 0.08}"}}}`
+		if string(body) != want {
+			t.Errorf("body = %s\nwant   %s", body, want)
+		}
+		io.WriteString(w, `{"environment_default":{"enabled":true,"value":{"type":"string","value":"{\"tax_rate\": 0.08}"},"variants":[]},"segment_overrides":[]}`)
+	})
+	if _, err := c.SetValue(context.Background(), "envkey", 7, Value{Type: "string", Value: `{"tax_rate": 0.08}`}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetValueClearsWithNull(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if want := `{"environment_default":{"value":null}}`; string(body) != want {
+			t.Errorf("body = %s\nwant   %s", body, want)
+		}
+		io.WriteString(w, `{"environment_default":{"enabled":true,"value":null,"variants":[]},"segment_overrides":[]}`)
+	})
+	if _, err := c.SetValue(context.Background(), "envkey", 7, Value{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAValueFlagsmithDidNotApplyIsAnError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"environment_default":{"enabled":true,"value":{"type":"string","value":"bad"},"variants":[]},"segment_overrides":[]}`)
+	})
+	if _, err := c.SetValue(context.Background(), "envkey", 7, Value{Type: "string", Value: "good"}); err == nil {
+		t.Fatal("a 200 whose body still shows the old value must be an error")
+	}
+}
+
 func TestChangeRequestsAreReported(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
