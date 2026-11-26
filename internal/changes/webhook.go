@@ -27,13 +27,14 @@ type Change struct {
 	ChangedBy string
 }
 
-// key keeps switch-ons and switch-offs apart. Flagbreaker's own switch-off
-// usually follows a person's switch-on within seconds, and Flagsmith sends
-// webhooks a few seconds late, so a single "latest" slot would lose the
-// person's change before it could be matched.
+// key keeps switch-ons, switch-offs and value changes apart. Flagbreaker's
+// own switch-off usually follows a person's switch-on within seconds, and
+// Flagsmith sends webhooks a few seconds late, so a single "latest" slot
+// would lose the person's change before it could be matched.
 type key struct {
 	environment, feature int64
 	enabled              bool
+	value                bool
 }
 
 // Store holds the latest switch-on and switch-off per environment and flag,
@@ -47,11 +48,20 @@ type Store struct {
 // NewStore returns an empty Store.
 func NewStore() *Store { return &Store{latest: map[key]Change{}} }
 
-// Record keeps c if it is newer than what is stored.
+// Record keeps c, a switch on or off, if it is newer than what is stored.
 func (s *Store) Record(environment, feature int64, c Change) {
+	s.keep(key{environment, feature, c.Enabled, false}, c)
+}
+
+// RecordValue keeps c, a value change that didn't switch the flag, if it is
+// newer than what is stored.
+func (s *Store) RecordValue(environment, feature int64, c Change) {
+	s.keep(key{environment, feature, false, true}, c)
+}
+
+func (s *Store) keep(k key, c Change) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key{environment, feature, c.Enabled}
 	if old, ok := s.latest[k]; !ok || c.At.After(old.At) {
 		s.latest[k] = c
 	}
@@ -60,9 +70,18 @@ func (s *Store) Record(environment, feature int64, c Change) {
 // Latest returns the latest webhook-reported change that switched the flag
 // to `enabled`.
 func (s *Store) Latest(environment, feature int64, enabled bool) (Change, bool) {
+	return s.get(key{environment, feature, enabled, false})
+}
+
+// LatestValue returns the latest webhook-reported value change.
+func (s *Store) LatestValue(environment, feature int64) (Change, bool) {
+	return s.get(key{environment, feature, false, true})
+}
+
+func (s *Store) get(k key) (Change, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, ok := s.latest[key{environment, feature, enabled}]
+	c, ok := s.latest[k]
 	return c, ok
 }
 
@@ -124,17 +143,18 @@ func Handler(secret string, store *Store, onChange func(environment, feature int
 			w.WriteHeader(http.StatusNoContent) // not an environment-default change
 			return
 		}
-		if prev := p.Data.PreviousState; prev != nil && prev.Enabled == state.Enabled {
-			// A value or variant edit, not a switch: it must not take the
-			// place of the switch it follows.
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
 		at, err := time.Parse(timestampLayout, p.Data.Timestamp)
 		if err != nil {
 			at = time.Now()
 		}
-		store.Record(state.Environment.ID, state.Feature.ID, Change{At: at, Enabled: state.Enabled, ChangedBy: p.Data.ChangedBy})
+		change := Change{At: at, Enabled: state.Enabled, ChangedBy: p.Data.ChangedBy}
+		if prev := p.Data.PreviousState; prev != nil && prev.Enabled == state.Enabled {
+			// A value or variant edit, not a switch: kept apart, so it never
+			// takes the place of the switch it follows.
+			store.RecordValue(state.Environment.ID, state.Feature.ID, change)
+		} else {
+			store.Record(state.Environment.ID, state.Feature.ID, change)
+		}
 		if onChange != nil {
 			onChange(state.Environment.ID, state.Feature.ID)
 		}
