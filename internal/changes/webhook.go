@@ -32,11 +32,13 @@ type Change struct {
 // webhooks a few seconds late, so a single "latest" slot would lose the
 // person's change before it could be matched.
 type key struct {
-	environment, feature string
+	environment, feature int64
 	enabled              bool
 }
 
-// Store holds the latest switch-on and switch-off per environment and flag.
+// Store holds the latest switch-on and switch-off per environment and flag,
+// by their Flagsmith IDs: names repeat across projects (every project can
+// have a "Production").
 type Store struct {
 	mu     sync.Mutex
 	latest map[key]Change
@@ -46,7 +48,7 @@ type Store struct {
 func NewStore() *Store { return &Store{latest: map[key]Change{}} }
 
 // Record keeps c if it is newer than what is stored.
-func (s *Store) Record(environment, feature string, c Change) {
+func (s *Store) Record(environment, feature int64, c Change) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := key{environment, feature, c.Enabled}
@@ -57,7 +59,7 @@ func (s *Store) Record(environment, feature string, c Change) {
 
 // Latest returns the latest webhook-reported change that switched the flag
 // to `enabled`.
-func (s *Store) Latest(environment, feature string, enabled bool) (Change, bool) {
+func (s *Store) Latest(environment, feature int64, enabled bool) (Change, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.latest[key{environment, feature, enabled}]
@@ -78,9 +80,11 @@ type payload struct {
 type featureState struct {
 	Enabled     bool `json:"enabled"`
 	Environment struct {
+		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	} `json:"environment"`
 	Feature struct {
+		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	} `json:"feature"`
 	// Set for identity and segment overrides, which aren't the
@@ -94,7 +98,7 @@ const timestampLayout = "2006-01-02T15:04:05.999999Z"
 
 // Handler verifies and stores FLAG_UPDATED webhooks, then calls onChange so
 // the guards for that flag are checked right away.
-func Handler(secret string, store *Store, onChange func(environment, feature string)) http.Handler {
+func Handler(secret string, store *Store, onChange func(environment, feature int64)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "use POST", http.StatusMethodNotAllowed)
@@ -130,9 +134,9 @@ func Handler(secret string, store *Store, onChange func(environment, feature str
 		if err != nil {
 			at = time.Now()
 		}
-		store.Record(state.Environment.Name, state.Feature.Name, Change{At: at, Enabled: state.Enabled, ChangedBy: p.Data.ChangedBy})
+		store.Record(state.Environment.ID, state.Feature.ID, Change{At: at, Enabled: state.Enabled, ChangedBy: p.Data.ChangedBy})
 		if onChange != nil {
-			onChange(state.Environment.Name, state.Feature.Name)
+			onChange(state.Environment.ID, state.Feature.ID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})

@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,19 +35,19 @@ func post(h http.Handler, payload, signature string) int {
 func TestRecordsASignedChange(t *testing.T) {
 	store := NewStore()
 	var notified string
-	h := Handler("s3cret", store, func(env, feature string) { notified = env + "/" + feature })
+	h := Handler("s3cret", store, func(env, feature int64) { notified = fmt.Sprintf("%d/%d", env, feature) })
 
 	if code := post(h, body, sign("s3cret", body)); code != http.StatusNoContent {
 		t.Fatalf("status = %d", code)
 	}
-	c, ok := store.Latest("Production", "new_pricing", true)
+	c, ok := store.Latest(1, 1, true)
 	if !ok || !c.Enabled || c.ChangedBy != "admin@flagbreaker.local" {
 		t.Fatalf("Latest = %+v, %v", c, ok)
 	}
 	if want := time.Date(2026, 11, 26, 10, 31, 5, 123456000, time.UTC); !c.At.Equal(want) {
 		t.Fatalf("At = %v, want %v", c.At, want)
 	}
-	if notified != "Production/new_pricing" {
+	if notified != "1/1" {
 		t.Fatalf("notified %q", notified)
 	}
 }
@@ -57,7 +58,7 @@ func TestRejectsABadSignature(t *testing.T) {
 	if code := post(h, body, sign("wrong", body)); code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", code)
 	}
-	if _, ok := store.Latest("Production", "new_pricing", true); ok {
+	if _, ok := store.Latest(1, 1, true); ok {
 		t.Fatal("stored an unsigned change")
 	}
 }
@@ -69,7 +70,7 @@ func TestIgnoresSegmentOverrides(t *testing.T) {
 	if code := post(h, segment, sign("s3cret", segment)); code != http.StatusNoContent {
 		t.Fatalf("status = %d", code)
 	}
-	if _, ok := store.Latest("Production", "new_pricing", true); ok {
+	if _, ok := store.Latest(1, 1, true); ok {
 		t.Fatal("stored a segment override as an environment default change")
 	}
 }
@@ -77,9 +78,9 @@ func TestIgnoresSegmentOverrides(t *testing.T) {
 func TestKeepsTheNewestChange(t *testing.T) {
 	store := NewStore()
 	newer := Change{At: time.Unix(200, 0), Enabled: false}
-	store.Record("Production", "f", newer)
-	store.Record("Production", "f", Change{At: time.Unix(100, 0), Enabled: false})
-	if c, _ := store.Latest("Production", "f", false); c != newer {
+	store.Record(1, 2, newer)
+	store.Record(1, 2, Change{At: time.Unix(100, 0), Enabled: false})
+	if c, _ := store.Latest(1, 2, false); c != newer {
 		t.Fatalf("Latest = %+v, want the newer change", c)
 	}
 }
@@ -87,9 +88,9 @@ func TestKeepsTheNewestChange(t *testing.T) {
 func TestKeepsSwitchOnsAndSwitchOffsApart(t *testing.T) {
 	store := NewStore()
 	on := Change{At: time.Unix(100, 0), Enabled: true, ChangedBy: "admin@example.com"}
-	store.Record("Production", "f", on)
-	store.Record("Production", "f", Change{At: time.Unix(104, 0), Enabled: false, ChangedBy: "flagbreaker"})
-	if c, ok := store.Latest("Production", "f", true); !ok || c != on {
+	store.Record(1, 2, on)
+	store.Record(1, 2, Change{At: time.Unix(104, 0), Enabled: false, ChangedBy: "flagbreaker"})
+	if c, ok := store.Latest(1, 2, true); !ok || c != on {
 		t.Fatalf("Latest switch-on = %+v, %v; want the person's change", c, ok)
 	}
 }
@@ -102,7 +103,7 @@ func TestIgnoresValueOnlyEdits(t *testing.T) {
 	if code := post(h, edit, sign("s3cret", edit)); code != http.StatusNoContent {
 		t.Fatalf("status = %d", code)
 	}
-	if _, ok := store.Latest("Production", "new_pricing", true); ok {
+	if _, ok := store.Latest(1, 1, true); ok {
 		t.Fatal("a value edit (enabled stays true) must not be recorded as a switch")
 	}
 }
