@@ -335,14 +335,21 @@ spec:
                     description: Enabled is whether the flag is on after the change.
                     type: boolean
                   previousValue:
-                    description: PreviousValue is the value before the change, for
-                      a value change.
+                    description: PreviousValue is the value before the suspect value
+                      change.
                     properties:
                       type:
                         type: string
                       value:
                         type: string
                     type: object
+                  switchedOn:
+                    description: |-
+                      SwitchedOn is true when the change switched the flag on, or came
+                      while an earlier switch-on was still a suspect (within the window and
+                      not yet blamed). Undoing the change then includes switching the flag
+                      off.
+                    type: boolean
                   timeUnknown:
                     description: |-
                       TimeUnknown is true when Flagbreaker wasn't running when the flag
@@ -355,7 +362,8 @@ spec:
                       blamed for one incident only.
                     type: boolean
                   value:
-                    description: Value is the value the change set, for a value change.
+                    description: Value is the value after the change, for a value
+                      change.
                     properties:
                       type:
                         type: string
@@ -364,9 +372,9 @@ spec:
                     type: object
                   valueChanged:
                     description: |-
-                      ValueChanged is true when the change set a new value and didn't switch
-                      the flag on or off. Flagbreaker blames a breakage on it like on a
-                      switch-on, and in act mode puts PreviousValue back.
+                      ValueChanged is true when the change set a new value, or came while an
+                      earlier new value was still a suspect. Flagbreaker blames a breakage
+                      on it like on a switch-on, and in act mode puts PreviousValue back.
                     type: boolean
                   workloadWasFailing:
                     description: |-
@@ -488,14 +496,21 @@ spec:
                     description: Enabled is whether the flag is on after the change.
                     type: boolean
                   previousValue:
-                    description: PreviousValue is the value before the change, for
-                      a value change.
+                    description: PreviousValue is the value before the suspect value
+                      change.
                     properties:
                       type:
                         type: string
                       value:
                         type: string
                     type: object
+                  switchedOn:
+                    description: |-
+                      SwitchedOn is true when the change switched the flag on, or came
+                      while an earlier switch-on was still a suspect (within the window and
+                      not yet blamed). Undoing the change then includes switching the flag
+                      off.
+                    type: boolean
                   timeUnknown:
                     description: |-
                       TimeUnknown is true when Flagbreaker wasn't running when the flag
@@ -508,7 +523,8 @@ spec:
                       blamed for one incident only.
                     type: boolean
                   value:
-                    description: Value is the value the change set, for a value change.
+                    description: Value is the value after the change, for a value
+                      change.
                     properties:
                       type:
                         type: string
@@ -517,9 +533,9 @@ spec:
                     type: object
                   valueChanged:
                     description: |-
-                      ValueChanged is true when the change set a new value and didn't switch
-                      the flag on or off. Flagbreaker blames a breakage on it like on a
-                      switch-on, and in act mode puts PreviousValue back.
+                      ValueChanged is true when the change set a new value, or came while an
+                      earlier new value was still a suspect. Flagbreaker blames a breakage
+                      on it like on a switch-on, and in act mode puts PreviousValue back.
                     type: boolean
                   workloadWasFailing:
                     description: |-

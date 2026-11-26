@@ -50,6 +50,8 @@ type fakeFlagsmith struct {
 	value     *flagsmith.Value
 	segments  map[int64]bool
 	conflict  bool
+	patch500  bool // every PATCH fails with a 500
+	health500 bool // every Feature Health report fails with a 500
 	patches   int
 	events    []fakeEvent
 	nextEvent int64
@@ -79,6 +81,10 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == flagURL && r.Method == http.MethodGet:
 		writeJSON(w, f.flagJSON())
 	case r.URL.Path == flagURL && r.Method == http.MethodPatch:
+		if f.patch500 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if f.conflict {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"detail": "Cannot make this change where change requests are enabled."}`))
@@ -123,6 +129,8 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, f.flagJSON())
 	case r.URL.Path == fmt.Sprintf("/api/v1/projects/%d/feature-health/events/", projectID):
 		writeJSON(w, f.latestEvents())
+	case r.URL.Path == healthPath && r.Method == http.MethodPost && f.health500:
+		w.WriteHeader(http.StatusInternalServerError)
 	case r.URL.Path == healthPath && r.Method == http.MethodPost:
 		var ev flagsmith.HealthEvent
 		_ = json.NewDecoder(r.Body).Decode(&ev)

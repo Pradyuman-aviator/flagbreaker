@@ -148,15 +148,21 @@ type FlagChange struct {
 	At metav1.Time `json:"at"`
 	// Enabled is whether the flag is on after the change.
 	Enabled bool `json:"enabled"`
-	// ValueChanged is true when the change set a new value and didn't switch
-	// the flag on or off. Flagbreaker blames a breakage on it like on a
-	// switch-on, and in act mode puts PreviousValue back.
+	// SwitchedOn is true when the change switched the flag on, or came
+	// while an earlier switch-on was still a suspect (within the window and
+	// not yet blamed). Undoing the change then includes switching the flag
+	// off.
+	// +optional
+	SwitchedOn bool `json:"switchedOn,omitempty"`
+	// ValueChanged is true when the change set a new value, or came while an
+	// earlier new value was still a suspect. Flagbreaker blames a breakage
+	// on it like on a switch-on, and in act mode puts PreviousValue back.
 	// +optional
 	ValueChanged bool `json:"valueChanged,omitempty"`
-	// Value is the value the change set, for a value change.
+	// Value is the value after the change, for a value change.
 	// +optional
 	Value *FlagValue `json:"value,omitempty"`
-	// PreviousValue is the value before the change, for a value change.
+	// PreviousValue is the value before the suspect value change.
 	// +optional
 	PreviousValue *FlagValue `json:"previousValue,omitempty"`
 	// ChangedBy is who made the change, when Flagsmith says so.

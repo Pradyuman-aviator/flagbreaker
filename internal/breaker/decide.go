@@ -66,12 +66,21 @@ type Input struct {
 	FlagEnabled bool
 	// LastChange is the latest change to the flag that Flagbreaker saw.
 	LastChange *v1alpha1.FlagChange
-	// ValueIncident is true when the current incident was caused by a change
-	// to the flag's value rather than by switching it on.
+	// ValueIncident is true when a new value is among the current
+	// incident's causes.
 	ValueIncident bool
+	// AlsoSwitchedOn, for a value incident, is true when switching the flag
+	// on is among its causes too.
+	AlsoSwitchedOn bool
 	// NewValueServed, for a value incident, is true while the flag still
 	// serves the value that caused it.
 	NewValueServed bool
+	// ValueKept, for an incident a switch-on and a new value caused, is true
+	// when its fix switched the flag off and left the new value in place.
+	ValueKept bool
+	// HealthyReportPending is true while a Healthy report to Feature Health
+	// has failed or waits for other guards of the flag.
+	HealthyReportPending bool
 
 	Pods            workload.Assessment
 	DesiredReplicas int32
@@ -128,11 +137,19 @@ func Decide(in Input) Decision {
 	case v1alpha1.PhaseTripped:
 		return decideTripped(in)
 	case v1alpha1.PhaseRecovered:
+		valueOnly := in.ValueIncident && !in.AlsoSwitchedOn
 		switch {
-		case in.ValueIncident && in.FlagDisabledAt == nil:
+		case newSuspectValue(in.LastChange):
+			// Remote config is read even while the flag is off.
+			return Decision{Action: Rearm, Mode: in.Mode, Why: "the flag got a new value, so Flagbreaker is watching it again"}
+		case valueOnly && in.HealthyReportPending:
+			// Re-arming now would make the Healthy report, once it goes out,
+			// say the recovery wasn't verified.
+			return Decision{Mode: in.Mode}
+		case valueOnly && in.FlagDisabledAt == nil:
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the new value still in place, so Flagbreaker is watching the flag again"}
-		case in.ValueIncident:
-			// The flag stayed on, with a value that works: nothing to wait for.
+		case valueOnly:
+			// Nothing was switched off, so nothing is left to wait for.
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the value changed back, so Flagbreaker is watching the flag again"}
 		case in.FlagEnabled && in.FlagDisabledAt == nil:
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the flag still on, so Flagbreaker is watching it again"}
@@ -167,7 +184,7 @@ func decideArmed(in Input) Decision {
 	}
 
 	switch {
-	case change == nil, !change.Enabled && !change.ValueChanged:
+	case change == nil, !change.IsSuspect():
 		return d // nothing switched on, and no new value
 	case in.Now.Sub(change.At.Time) > in.Window:
 		return d // the change is too old to blame
@@ -207,23 +224,21 @@ func decideTripped(in Input) Decision {
 		return Decision{Action: Rearm, Mode: in.Mode, Acknowledge: true,
 			Why: "a person dismissed the incident in Flagsmith, so Flagbreaker is watching the flag again and won't blame this change again"}
 	}
-	// What caused the incident is still served: the flag is on, or, for a
-	// value incident, it still has the new value.
-	active := in.FlagEnabled
-	if in.ValueIncident {
-		active = in.NewValueServed
-	}
-	if active {
-		if in.FlagDisabledAt != nil {
+	// What caused the incident is still served: the flag is on (for a
+	// switch-on or an alert), or the flag still has the new value.
+	switchOn := (!in.ValueIncident || in.AlsoSwitchedOn) && in.FlagEnabled
+	newValue := in.ValueIncident && in.NewValueServed
+	if switchOn || newValue {
+		if in.FlagDisabledAt != nil && (switchOn || !in.ValueKept) {
 			why := "a person turned the flag back on, so Flagbreaker is watching it again"
-			if in.ValueIncident {
+			if newValue && !switchOn {
 				why = "a person set the new value again, so Flagbreaker is watching the flag again"
 			}
 			return Decision{Action: Rearm, Mode: in.Mode, Why: why}
 		}
 		if in.Mode == v1alpha1.ModeAct {
 			why := "retrying the switch-off"
-			if in.ValueIncident {
+			if newValue && !switchOn {
 				why = "retrying putting the previous value back"
 			}
 			return Decision{Action: SwitchOff, Mode: in.Mode, Why: why}
@@ -265,9 +280,18 @@ func newestNewAlert(alerts []Alert, handled int64, since time.Time) *Alert {
 	return newest
 }
 
+// newSuspectValue reports whether the latest change is a new value that
+// hasn't been blamed or dismissed yet.
+func newSuspectValue(c *v1alpha1.FlagChange) bool {
+	return c != nil && c.ValueChanged && !c.Tripped && !c.Acknowledged
+}
+
 func describeChange(c *v1alpha1.FlagChange) string {
 	s := "the flag was switched on"
-	if c.ValueChanged {
+	switch {
+	case c.ValueChanged && c.IsSwitchOn():
+		s = "the flag was switched on and its value changed"
+	case c.ValueChanged:
 		s = "the flag's value was changed"
 	}
 	if c.ChangedBy != "" {

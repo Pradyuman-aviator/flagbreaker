@@ -263,6 +263,7 @@ func TestANewValueCountsEvenWhileTheFlagIsOff(t *testing.T) {
 func valueTripped(now time.Time, pods workload.Assessment) Input {
 	in := armed(now, valueChanged(t0), pods)
 	in.Phase, in.ValueIncident = v1alpha1.PhaseTripped, true
+	in.LastChange.Tripped = true // it caused this incident
 	return in
 }
 
@@ -298,7 +299,31 @@ func TestAValueIncidentRearmsRightAfterRecovery(t *testing.T) {
 	at := t0.Add(10 * time.Second)
 	in := valueTripped(t0.Add(50*time.Second), workload.Assessment{Pods: 2, Ready: 2})
 	in.Phase, in.FlagDisabledAt = v1alpha1.PhaseRecovered, &at
+	// Off, so the switch-on rule ("the flag is on again") can't be what
+	// re-arms it.
+	in.FlagEnabled = false
 	if d := Decide(in); d.Action != Rearm {
 		t.Fatalf("got %+v, want Rearm: a value that was put back leaves nothing to wait for", d)
+	}
+	in.HealthyReportPending = true
+	if d := Decide(in); d.Action != Wait {
+		t.Fatalf("got %+v, want Wait until the Healthy report is out", d)
+	}
+}
+
+func TestANewValueRearmsARecoveredGuard(t *testing.T) {
+	at := t0.Add(10 * time.Second)
+	in := armed(t0.Add(60*time.Second), valueChanged(t0.Add(55*time.Second)), workload.Assessment{Pods: 2, Ready: 2})
+	in.Phase, in.FlagEnabled, in.FlagDisabledAt = v1alpha1.PhaseRecovered, false, &at
+	if d := Decide(in); d.Action != Rearm || !strings.Contains(d.Why, "new value") {
+		t.Fatalf("got %+v, want Rearm for the new value", d)
+	}
+}
+
+func TestACombinedIncidentRetriesWhileEitherPartIsServed(t *testing.T) {
+	in := valueTripped(t0.Add(30*time.Second), failing(2, 0, t0.Add(3*time.Second)))
+	in.AlsoSwitchedOn, in.FlagEnabled, in.NewValueServed = true, true, false
+	if d := Decide(in); d.Action != SwitchOff || d.Why != "retrying the switch-off" {
+		t.Fatalf("the flag is still on: got %+v", d)
 	}
 }
