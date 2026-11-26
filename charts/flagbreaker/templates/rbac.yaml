@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flagbreaker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+---
+# Generated from the +kubebuilder:rbac markers in internal/controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flagbreaker.name" . }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    # delete restarts crash-looping pods after a switch-off
+    # (FlagGuard spec.restartCrashingPods).
+    verbs: [get, list, watch, delete]
+  - apiGroups: [apps]
+    # ReplicaSets and ControllerRevisions show when a workload last rolled
+    # out, so a deploy that coincides with a flag change isn't blamed on it.
+    resources: [deployments, replicasets, statefulsets, daemonsets, controllerrevisions]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [flagbreaker.dev]
+    resources: [flagguards]
+    # create, update and delete keep the FlagGuards made from
+    # flagbreaker.dev/flags annotations on workloads.
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [flagbreaker.dev]
+    resources: [flagguards/status]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flagbreaker.name" . }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flagbreaker.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flagbreaker.name" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election, only in the release namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flagbreaker.name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flagbreaker.name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flagbreaker.name" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flagbreaker.name" . }}
+    namespace: {{ .Release.Namespace }}

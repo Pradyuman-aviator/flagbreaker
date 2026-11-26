@@ -1,0 +1,11 @@
+apiVersion: v2
+name: flagbreaker
+description: A circuit breaker for Flagsmith flags on Kubernetes. It reports workloads that break after a flag change to Flagsmith Feature Health and can switch the flag off.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - flagsmith
+  - feature-flags
+  - circuit-breaker
+  - kubernetes

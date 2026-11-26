@@ -1,0 +1,69 @@
+image:
+  repository: ghcr.io/pradyuman-aviator/flagbreaker
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# One replica is enough: leader election makes sure only one replica ever
+# changes flags, so more replicas only add standby.
+replicaCount: 1
+
+flagsmith:
+  # Flagsmith API base URL, without /api/v1.
+  url: http://flagsmith-api.flagsmith:8000
+  # Client-side key of the environment that holds the breaker's own flags:
+  # flagbreaker_enabled, flagbreaker_mode and flagbreaker_policy. Empty
+  # means each FlagGuard's spec.mode decides, and watch when it sets none.
+  settingsEnvironmentKey: ""
+  # Environment key for workloads annotated with flagbreaker.dev/flags that
+  # don't set flagbreaker.dev/environment-key.
+  defaultEnvironmentKey: ""
+  # Name of a Secret with the keys apiKey (an organisation API key),
+  # healthWebhookPath (the Feature Health Webhook provider's path, starting
+  # with /api/v1/feature-health/) and, optionally, webhookSecret (the secret
+  # of the environment webhook that sends FLAG_UPDATED events).
+  existingSecret: ""
+  # Used only when existingSecret is empty, to create the Secret.
+  apiKey: ""
+  healthWebhookPath: ""
+  webhookSecret: ""
+
+# How often each FlagGuard is checked. Pod changes and Flagsmith webhooks
+# trigger a check right away as well.
+syncPeriod: 5s
+
+annotations:
+  # Create FlagGuards from annotations on Deployments, StatefulSets and
+  # DaemonSets:
+  #   flagbreaker.dev/flags: "new_pricing,express_checkout"
+  #   flagbreaker.dev/environment-key: "<client-side key>"   (optional)
+  #   flagbreaker.dev/mode: "watch"                          (optional)
+  #   flagbreaker.dev/stable-for: "30s"                      (optional)
+  #   flagbreaker.dev/runbook-url: "https://..."             (optional)
+  enabled: true
+
+# A link to the workload added to every Feature Health event, as a Go
+# template with .Namespace, .Kind, .Name and .Guard. For Headlamp:
+#   https://headlamp.example.com/c/main/deployments/{{.Namespace}}/{{.Name}}
+workloadLinkTemplate: ""
+
+# For example prometheus.io/scrape: "true" and prometheus.io/port: "8080".
+podAnnotations: {}
+
+webhook:
+  # Receives Flagsmith FLAG_UPDATED webhooks for exact change times. Point an
+  # environment webhook at http://<release>-webhook.<namespace>.svc:8082/webhooks/flagsmith
+  # and add that host to Flagsmith's SSRF_ALLOWED_HOSTS.
+  enabled: true
+  port: 8082
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

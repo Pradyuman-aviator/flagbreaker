@@ -1,0 +1,120 @@
+{{- if not .Values.flagsmith.existingSecret }}
+{{- if or (not .Values.flagsmith.apiKey) (not .Values.flagsmith.healthWebhookPath) }}
+{{- fail "set flagsmith.existingSecret, or both flagsmith.apiKey and flagsmith.healthWebhookPath" }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "flagbreaker.secretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  apiKey: {{ .Values.flagsmith.apiKey | quote }}
+  healthWebhookPath: {{ .Values.flagsmith.healthWebhookPath | quote }}
+  webhookSecret: {{ .Values.flagsmith.webhookSecret | quote }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flagbreaker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "flagbreaker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "flagbreaker.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "flagbreaker.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: flagbreaker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --flagsmith-url={{ .Values.flagsmith.url }}
+            - --sync-period={{ .Values.syncPeriod }}
+            - --webhook-bind-address={{ if .Values.webhook.enabled }}:{{ .Values.webhook.port }}{{ end }}
+            - --annotations={{ .Values.annotations.enabled }}
+            {{- with .Values.workloadLinkTemplate }}
+            - --workload-link-template={{ . }}
+            {{- end }}
+          env:
+            - name: FLAGSMITH_SETTINGS_ENVIRONMENT_KEY
+              value: {{ .Values.flagsmith.settingsEnvironmentKey | quote }}
+            - name: FLAGSMITH_DEFAULT_ENVIRONMENT_KEY
+              value: {{ .Values.flagsmith.defaultEnvironmentKey | quote }}
+            - name: FLAGSMITH_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "flagbreaker.secretName" . }}, key: apiKey}
+            - name: FLAGSMITH_HEALTH_WEBHOOK_PATH
+              valueFrom:
+                secretKeyRef: {name: {{ include "flagbreaker.secretName" . }}, key: healthWebhookPath}
+            - name: FLAGSMITH_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ include "flagbreaker.secretName" . }}, key: webhookSecret, optional: true}
+          ports:
+            - {name: metrics, containerPort: 8080}
+            - {name: probes, containerPort: 8081}
+            {{- if .Values.webhook.enabled }}
+            - {name: webhook, containerPort: {{ .Values.webhook.port }}}
+            {{- end }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: probes}
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Prometheus metrics: flagbreaker_trips_total, flagbreaker_detection_seconds,
+# flagbreaker_recovery_seconds and more, next to controller-runtime's own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flagbreaker.name" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "flagbreaker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+{{- if .Values.webhook.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flagbreaker.name" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flagbreaker.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "flagbreaker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: {{ .Values.webhook.port }}
+      targetPort: webhook
+{{- end }}
