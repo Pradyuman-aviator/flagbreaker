@@ -120,3 +120,51 @@ func TestErrorsHideTheWebhookPath(t *testing.T) {
 		t.Fatalf("err = %v, want an error without the secret path", err)
 	}
 }
+
+func TestNetworkErrorsHideTheWebhookPath(t *testing.T) {
+	// Nothing listens on this port: the dial fails, and Go's error repeats
+	// the URL, secret path included, unless the client strips it.
+	c := &Client{BaseURL: "http://127.0.0.1:1", HealthWebhookPath: "/api/v1/feature-health/SECRETSIG/"}
+	err := c.ReportHealth(context.Background(), HealthEvent{Feature: "f", Status: Unhealthy})
+	if err == nil || strings.Contains(err.Error(), "SECRETSIG") {
+		t.Fatalf("error = %v, want one without the secret path", err)
+	}
+}
+
+func TestARedirectDoesNotTurnASwitchOffIntoAGet(t *testing.T) {
+	var methods []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.URL.Path == "/moved/" {
+			io.WriteString(w, `{"environment_default":{"enabled":true},"segment_overrides":[]}`)
+			return
+		}
+		http.Redirect(w, r, "/moved/", http.StatusMovedPermanently)
+	})
+	if _, err := c.SwitchOff(context.Background(), "envkey", 7, nil); err == nil {
+		t.Fatal("a redirected PATCH must fail, not succeed as a GET")
+	}
+	if len(methods) != 1 {
+		t.Fatalf("requests = %v, want only the PATCH", methods)
+	}
+}
+
+func TestASwitchOffFlagsmithDidNotApplyIsAnError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"environment_default":{"enabled":true},"segment_overrides":[]}`)
+	})
+	if _, err := c.SwitchOff(context.Background(), "envkey", 7, nil); err == nil {
+		t.Fatal("want an error when Flagsmith answers 200 but the flag is still on")
+	}
+}
+
+func TestAnExperimentOverrideIsARejection(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"detail": "System segment overrides can't be modified.", "code": "system_segment_modification"}`)
+	})
+	_, err := c.SwitchOff(context.Background(), "envkey", 7, []int64{9})
+	if !IsRejected(err) || errors.Is(err, ErrChangeRequestsEnabled) {
+		t.Fatalf("err = %v, want a rejection that isn't change requests", err)
+	}
+}

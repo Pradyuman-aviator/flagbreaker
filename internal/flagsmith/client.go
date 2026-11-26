@@ -29,6 +29,26 @@ var ErrChangeRequestsEnabled = errors.New("the environment requires change reque
 // ErrNotFound means Flagsmith returned 404.
 var ErrNotFound = errors.New("not found in Flagsmith")
 
+// StatusError is any other error response from Flagsmith.
+type StatusError struct {
+	Method, Path string
+	Code         int
+	Body         string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s: Flagsmith returned %d: %s", e.Method, e.Path, e.Code, truncate(e.Body, 300))
+}
+
+// IsRejected reports whether Flagsmith refused a change as such (400, or a
+// 409 other than change requests), for example a change to an experiment's
+// system-segment override. A timeout or a 5xx is not a rejection: the same
+// request may succeed later.
+func IsRejected(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusBadRequest || se.Code == http.StatusConflict)
+}
+
 // Client talks to one Flagsmith instance.
 type Client struct {
 	// BaseURL is where the API lives, without /api/v1, for example
@@ -167,8 +187,14 @@ func (c *Client) UpdateFlag(ctx context.Context, environmentKey string, featureI
 		body.SegmentOverrides = append(body.SegmentOverrides, overrideChange{Segment: segmentRef{ID: id}, Enabled: u.SegmentsEnabled})
 	}
 	var flag Flag
-	err := c.do(ctx, http.MethodPatch, flagPath(environmentKey, featureID), body, &flag)
-	return flag, err
+	if err := c.do(ctx, http.MethodPatch, flagPath(environmentKey, featureID), body, &flag); err != nil {
+		return flag, err
+	}
+	// Flagsmith answers with the flag as it now is. Trust that, not the 200.
+	if u.Default != nil && flag.EnvironmentDefault.Enabled != *u.Default {
+		return flag, fmt.Errorf("PATCH %s: Flagsmith answered, but the environment default is still enabled=%v", flagPath(environmentKey, featureID), flag.EnvironmentDefault.Enabled)
+	}
+	return flag, nil
 }
 
 // HealthStatus is a Feature Health status.
@@ -301,7 +327,7 @@ func (c *Client) doWithAuth(ctx context.Context, method, path string, body, out 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, reader)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s %s: invalid request", method, redact(path))
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -311,16 +337,19 @@ func (c *Client) doWithAuth(ctx context.Context, method, path string, body, out 
 		req.Header.Set("Authorization", "Api-Key "+c.APIKey)
 	}
 
-	httpClient := c.HTTP
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
+		// A *url.Error repeats the full URL, which for Feature Health holds
+		// the secret path. Keep only its cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return fmt.Errorf("%s %s: %w", method, redact(path), err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Generous: the Feature Health events list is not paginated.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 
 	switch {
 	case resp.StatusCode == http.StatusConflict && isChangeRequestError(data):
@@ -328,7 +357,7 @@ func (c *Client) doWithAuth(ctx context.Context, method, path string, body, out 
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("%s %s: %w", method, redact(path), ErrNotFound)
 	case resp.StatusCode >= 300:
-		return fmt.Errorf("%s %s: Flagsmith returned %d: %s", method, redact(path), resp.StatusCode, truncate(string(data), 300))
+		return &StatusError{Method: method, Path: redact(path), Code: resp.StatusCode, Body: string(data)}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -336,6 +365,27 @@ func (c *Client) doWithAuth(ctx context.Context, method, path string, body, out 
 		}
 	}
 	return nil
+}
+
+// httpClient never follows a redirect for anything but GET: Go would turn a
+// PATCH or POST into a GET on a 301, and a switch-off would quietly do
+// nothing. The redirect comes back as an error instead.
+func (c *Client) httpClient() *http.Client {
+	base := c.HTTP
+	if base == nil {
+		base = &http.Client{Timeout: 10 * time.Second}
+	}
+	hc := *base
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && via[0].Method != http.MethodGet {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &hc
 }
 
 // isChangeRequestError recognises Flagsmith's ChangeRequestsEnabledError. DRF
