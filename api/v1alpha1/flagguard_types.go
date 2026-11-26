@@ -130,14 +130,35 @@ const AllowedEnvironmentsAnnotation = "flagbreaker.dev/allowed-environments"
 // trips the breaker again.
 const RestoreAnnotation = "flagbreaker.dev/restore"
 
-// FlagChange records a change to the flag's environment default.
+// FlagValue is a flag's remote config value, as Flagsmith types it. An empty
+// Type means the flag has no value.
+type FlagValue struct {
+	// +optional
+	Type string `json:"type,omitempty"`
+	// +optional
+	Value string `json:"value,omitempty"`
+}
+
+// FlagChange records a change to the flag's environment default: switching
+// it on or off, or changing its value.
 type FlagChange struct {
 	// At is when the change happened, from Flagsmith's webhook. Without one,
 	// it is the check before the change was seen: the earliest it can have
 	// happened.
 	At metav1.Time `json:"at"`
-	// Enabled is what the flag serves after the change.
+	// Enabled is whether the flag is on after the change.
 	Enabled bool `json:"enabled"`
+	// ValueChanged is true when the change set a new value and didn't switch
+	// the flag on or off. Flagbreaker blames a breakage on it like on a
+	// switch-on, and in act mode puts PreviousValue back.
+	// +optional
+	ValueChanged bool `json:"valueChanged,omitempty"`
+	// Value is the value the change set, for a value change.
+	// +optional
+	Value *FlagValue `json:"value,omitempty"`
+	// PreviousValue is the value before the change, for a value change.
+	// +optional
+	PreviousValue *FlagValue `json:"previousValue,omitempty"`
 	// ChangedBy is who made the change, when Flagsmith says so.
 	// +optional
 	ChangedBy string `json:"changedBy,omitempty"`
@@ -232,6 +253,10 @@ type FlagGuardStatus struct {
 	// +optional
 	FlagEnabled *bool `json:"flagEnabled,omitempty"`
 
+	// FlagValue is the environment default's value at the last check.
+	// +optional
+	FlagValue *FlagValue `json:"flagValue,omitempty"`
+
 	// LastFlagChange is the latest change Flagbreaker saw.
 	// +optional
 	LastFlagChange *FlagChange `json:"lastFlagChange,omitempty"`
@@ -261,7 +286,9 @@ type FlagGuardStatus struct {
 	TrippedAt *metav1.Time `json:"trippedAt,omitempty"`
 
 	// FlagDisabledAt is when the flag was switched off during the current
-	// incident, by Flagbreaker or by a person.
+	// incident, by Flagbreaker or by a person. For an incident caused by a
+	// value change, it is when the value was changed again: put back by
+	// Flagbreaker, or changed by a person.
 	// +optional
 	FlagDisabledAt *metav1.Time `json:"flagDisabledAt,omitempty"`
 

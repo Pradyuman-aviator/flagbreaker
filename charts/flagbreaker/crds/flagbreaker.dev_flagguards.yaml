@@ -276,7 +276,9 @@ spec:
               flagDisabledAt:
                 description: |-
                   FlagDisabledAt is when the flag was switched off during the current
-                  incident, by Flagbreaker or by a person.
+                  incident, by Flagbreaker or by a person. For an incident caused by a
+                  value change, it is when the value was changed again: put back by
+                  Flagbreaker, or changed by a person.
                 format: date-time
                 type: string
               flagDisabledBy:
@@ -289,6 +291,15 @@ spec:
                   FlagEnabled is what the flag's environment default served at the last
                   check.
                 type: boolean
+              flagValue:
+                description: FlagValue is the environment default's value at the last
+                  check.
+                properties:
+                  type:
+                    type: string
+                  value:
+                    type: string
+                type: object
               handledEventID:
                 description: |-
                   HandledEventID is the newest Feature Health event from another
@@ -321,8 +332,17 @@ spec:
                       says so.
                     type: string
                   enabled:
-                    description: Enabled is what the flag serves after the change.
+                    description: Enabled is whether the flag is on after the change.
                     type: boolean
+                  previousValue:
+                    description: PreviousValue is the value before the change, for
+                      a value change.
+                    properties:
+                      type:
+                        type: string
+                      value:
+                        type: string
+                    type: object
                   timeUnknown:
                     description: |-
                       TimeUnknown is true when Flagbreaker wasn't running when the flag
@@ -333,6 +353,20 @@ spec:
                     description: |-
                       Tripped is true once this change has caused an incident. A change is
                       blamed for one incident only.
+                    type: boolean
+                  value:
+                    description: Value is the value the change set, for a value change.
+                    properties:
+                      type:
+                        type: string
+                      value:
+                        type: string
+                    type: object
+                  valueChanged:
+                    description: |-
+                      ValueChanged is true when the change set a new value and didn't switch
+                      the flag on or off. Flagbreaker blames a breakage on it like on a
+                      switch-on, and in act mode puts PreviousValue back.
                     type: boolean
                   workloadWasFailing:
                     description: |-
@@ -451,8 +485,17 @@ spec:
                       says so.
                     type: string
                   enabled:
-                    description: Enabled is what the flag serves after the change.
+                    description: Enabled is whether the flag is on after the change.
                     type: boolean
+                  previousValue:
+                    description: PreviousValue is the value before the change, for
+                      a value change.
+                    properties:
+                      type:
+                        type: string
+                      value:
+                        type: string
+                    type: object
                   timeUnknown:
                     description: |-
                       TimeUnknown is true when Flagbreaker wasn't running when the flag
@@ -463,6 +506,20 @@ spec:
                     description: |-
                       Tripped is true once this change has caused an incident. A change is
                       blamed for one incident only.
+                    type: boolean
+                  value:
+                    description: Value is the value the change set, for a value change.
+                    properties:
+                      type:
+                        type: string
+                      value:
+                        type: string
+                    type: object
+                  valueChanged:
+                    description: |-
+                      ValueChanged is true when the change set a new value and didn't switch
+                      the flag on or off. Flagbreaker blames a breakage on it like on a
+                      switch-on, and in act mode puts PreviousValue back.
                     type: boolean
                   workloadWasFailing:
                     description: |-
