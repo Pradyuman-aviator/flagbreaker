@@ -37,16 +37,30 @@ ADMIN_PASSWORD="$(cat "$PASSWORD_FILE")"
 AUTH_HEADER=""
 
 # api METHOD PATH [JSON] -> prints the response body; fails on HTTP >= 300.
+# Right after a fresh install, Flagsmith can refuse connections or answer
+# 5xx for a while, so failures like that are retried: any of them for a GET,
+# and for a write only those that mean it never got there (no answer, 502,
+# 503, 504), so nothing is created twice.
 api() {
-  local method=$1 path=$2 data=${3:-} out code
+  local method=$1 path=$2 data=${3:-} out code try retry
   local args=(-sS -X "$method" -H "Content-Type: application/json" -w $'\n%{http_code}')
   [[ -n "$AUTH_HEADER" ]] && args+=(-H "Authorization: $AUTH_HEADER")
   [[ -n "$data" ]] && args+=(--data "$data")
-  out="$(curl "${args[@]}" "$API_URL$path")"
-  code="${out##*$'\n'}"
-  out="${out%$'\n'*}"
-  if ((code >= 300)); then
+  for try in 1 2 3 4 5 6; do
+    out="$(curl "${args[@]}" "$API_URL$path" 2>&1)" || out="$out"$'\n000'
+    code="${out##*$'\n'}"
+    out="${out%$'\n'*}"
+    retry='^(000|502|503|504)$'
+    [[ "$method" == GET ]] && retry='^(000|5[0-9][0-9])$'
+    if ! [[ "$code" =~ $retry ]] || ((try == 6)); then
+      break
+    fi
+    sleep $((try * 3))
+  done
+  if ! [[ "$code" =~ ^[0-9]+$ ]] || ((code >= 300)); then
     echo "Flagsmith API: $method $path returned $code: $out" >&2
+    # On GitHub Actions, also as an annotation, which shows on the run's page.
+    [[ "${GITHUB_ACTIONS:-}" == true ]] && printf '::error::Flagsmith API: %s %s returned %s: %s\n' "$method" "$path" "$code" "${out:0:300}"
     return 1
   fi
   printf '%s' "$out"
