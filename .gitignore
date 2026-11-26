@@ -1,0 +1,10 @@
+# Tools downloaded by hack/tools.sh
+/bin/
+
+# Demo cluster state: kubeconfig, admin password, API keys
+/.demo/
+
+# Go build output
+/dist/
+*.test
+*.out
