@@ -245,7 +245,7 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 81 Go tests cover the rules, the client, webhook verification,
+- **Tests.** 82 Go tests cover the rules, the client, webhook verification,
   and whole incidents run through `Reconcile` against a fake Flagsmith,
   including one per bug that two independent code reviews found. On every
   push to main and every pull request, CI runs them, plus an end-to-end job
@@ -271,6 +271,13 @@ stateDiagram-v2
 - **Unlicensed self-hosted Flagsmith allows one project and one seat per
   organisation.** So the demo uses an organisation API key, not a
   least-privilege user.
+
+## Tried it?
+
+Feedback is welcome, especially from macOS and Apple Silicon, where the demo
+hasn't run end to end yet. If something doesn't work, open an
+[issue](https://github.com/Pradyuman-aviator/flagbreaker/issues) with your OS,
+your Docker version and the last lines `up.sh` printed.
 
 ## License
 
