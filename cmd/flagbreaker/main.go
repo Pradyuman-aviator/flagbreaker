@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -35,6 +36,7 @@ func main() {
 		defaultEnvKey  string
 		workloadLink   string
 		annotations    bool
+		namespaceOptIn bool
 		syncPeriod     time.Duration
 		webhookAddr    string
 		metricsAddr    string
@@ -52,6 +54,8 @@ func main() {
 		"Go template for a link to the workload in every Feature Health event, for example "+
 			"https://headlamp.example.com/c/main/deployments/{{.Namespace}}/{{.Name}}; it gets .Namespace, .Kind, .Name and .Guard")
 	flag.BoolVar(&annotations, "annotations", true, "create FlagGuards from flagbreaker.dev/flags annotations on workloads")
+	flag.BoolVar(&namespaceOptIn, "require-namespace-opt-in", true,
+		"act only on Flagsmith environments that a guard's namespace lists in its flagbreaker.dev/allowed-environments annotation")
 	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Second, "how often each FlagGuard is checked")
 	flag.StringVar(&webhookAddr, "webhook-bind-address", ":8082", "address for Flagsmith FLAG_UPDATED webhooks; empty disables them")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for Prometheus metrics; 0 disables them")
@@ -78,7 +82,10 @@ func main() {
 	must(v1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		// Pods, ReplicaSets and workloads are watched cluster-wide; managed
+		// fields are most of their size and never read.
+		Cache:                  cache.Options{DefaultTransform: cache.TransformStripManagedFields()},
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         leaderElection,
@@ -111,6 +118,11 @@ func main() {
 		Changes:      store,
 		SyncPeriod:   syncPeriod,
 		WorkloadLink: linkTemplate,
+
+		RequireNamespaceOptIn: namespaceOptIn,
+	}
+	if !namespaceOptIn {
+		log.Info("--require-namespace-opt-in=false: a FlagGuard in any namespace may act on any Flagsmith environment the API key reaches")
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		log.Error(err, "setting up the controller")
@@ -147,15 +159,18 @@ func main() {
 	}
 }
 
-// webhookServer receives FLAG_UPDATED webhooks. It runs only on the leader,
-// the replica that acts on them.
+// webhookServer receives FLAG_UPDATED webhooks. It runs on every replica
+// from the start, not only once one becomes the leader, so the Service
+// always has an endpoint and a webhook sent just after a restart still dates
+// the change. The chart runs one replica, replaced with Recreate.
 func webhookServer(addr, secret string, store *changes.Store, r *controller.FlagGuardReconciler) manager.Runnable {
-	return manager.RunnableFunc(func(ctx context.Context) error {
+	return anyReplica(func(ctx context.Context) error {
 		mux := http.NewServeMux()
 		mux.Handle("/webhooks/flagsmith", changes.Handler(secret, store, func(environment, feature string) {
 			r.FlagChanged(ctx, environment, feature)
 		}))
-		srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 		go func() {
 			<-ctx.Done()
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -168,6 +183,12 @@ func webhookServer(addr, secret string, store *changes.Store, r *controller.Flag
 		return nil
 	})
 }
+
+// anyReplica is a Runnable that doesn't wait for leader election.
+type anyReplica func(ctx context.Context) error
+
+func (f anyReplica) Start(ctx context.Context) error { return f(ctx) }
+func (anyReplica) NeedLeaderElection() bool          { return false }
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
