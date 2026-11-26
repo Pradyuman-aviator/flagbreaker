@@ -28,6 +28,8 @@ type Assessment struct {
 	Problems []Problem
 	// CrashLooping lists pods with a container waiting in CrashLoopBackOff.
 	CrashLooping []string
+	// NotReady lists pods whose Ready condition isn't True.
+	NotReady []string
 }
 
 // StartupGrace: a pod that is not ready within this long of being created is
@@ -71,6 +73,9 @@ func Assess(pods []corev1.Pod, now time.Time, notReadyGrace time.Duration) Asses
 		}
 
 		ready := podReady(pod)
+		if ready == nil || ready.Status != corev1.ConditionTrue {
+			a.NotReady = append(a.NotReady, pod.Name)
+		}
 		if ready != nil && ready.Status == corev1.ConditionTrue {
 			a.Ready++
 		} else if ready != nil && now.Sub(ready.LastTransitionTime.Time) >= notReadyGrace && startedUp(pod, ready) {
@@ -90,6 +95,7 @@ func Assess(pods []corev1.Pod, now time.Time, notReadyGrace time.Duration) Asses
 	}
 	sort.Slice(a.Problems, func(i, j int) bool { return a.Problems[i].At.Before(a.Problems[j].At) })
 	sort.Strings(a.CrashLooping)
+	sort.Strings(a.NotReady)
 	return a
 }
 
@@ -112,6 +118,26 @@ func (a Assessment) FailingBetween(from, to time.Time) []Problem {
 	var out []Problem
 	for _, p := range a.Problems {
 		if !p.At.Before(from) && p.At.Before(to) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// BrokenBefore returns the problems that began before t on pods that are
+// still broken: crash-looping or not ready. A crash loop's restarts can be
+// minutes apart, so "failed in the last minute" alone misses one.
+func (a Assessment) BrokenBefore(t time.Time) []Problem {
+	broken := map[string]bool{}
+	for _, n := range a.CrashLooping {
+		broken[n] = true
+	}
+	for _, n := range a.NotReady {
+		broken[n] = true
+	}
+	var out []Problem
+	for _, p := range a.Problems {
+		if p.At.Before(t) && broken[p.Pod] {
 			out = append(out, p)
 		}
 	}
