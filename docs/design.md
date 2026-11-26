@@ -118,8 +118,9 @@ was, in one versioned change, and leaves the flag on or off as it was. It
 does that only while the flag still has the value that caused it; a person's
 later change stands. In watch mode, a person setting any other value counts
 as the fix, as a switch-off does for a switch-on; switching the flag off
-doesn't. After verified recovery, and once Feature Health has the Healthy
-report, there is nothing left to wait for, so the guard is armed again.
+doesn't. After verified recovery there is nothing left to wait for, so the
+guard is armed again at once; a Healthy report still on its way says the
+recovery was verified.
 
 **Both at once: recover first, blame second.** People often switch a flag
 on and edit its value close together, or in one save. When the workload

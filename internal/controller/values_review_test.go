@@ -327,3 +327,26 @@ func TestAReportSentAfterReArmingStillSaysTheRecoveryWasVerified(t *testing.T) {
 		t.Fatalf("the recovery was verified: %s", ev.FirstText())
 	}
 }
+
+func TestASwitchOnWhileTheHealthyReportIsStuckStillTrips(t *testing.T) {
+	// A value-only incident on an off flag recovers, but Feature Health
+	// can't be reached. A person switches the flag on, and the pods crash.
+	w := offWithGoodValue(t, v1alpha1.ModeAct)
+	w.fs.set(func(f *fakeFlagsmith) { f.value = badValue })
+	w.at(5 * time.Second)
+	w.crashPods(t0.Add(7 * time.Second))
+	w.at(10 * time.Second)
+	w.healthyPods(2, t0.Add(12*time.Second))
+	w.at(15 * time.Second)
+	w.fs.set(func(f *fakeFlagsmith) { f.health500 = true })
+	w.at(36 * time.Second) // recovered; the Healthy report fails
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	w.at(41 * time.Second)
+	w.crashPods(t0.Add(43 * time.Second))
+	if g := w.at(46 * time.Second); g.Status.Phase != v1alpha1.PhaseTripped {
+		t.Fatalf("the switch-on must still be watched while the report is stuck: %+v", g.Status)
+	}
+	if def, _ := w.flag(); def {
+		t.Fatal("the flag should be switched off")
+	}
+}

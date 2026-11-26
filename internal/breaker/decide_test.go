@@ -305,10 +305,6 @@ func TestAValueIncidentRearmsRightAfterRecovery(t *testing.T) {
 	if d := Decide(in); d.Action != Rearm {
 		t.Fatalf("got %+v, want Rearm: a value that was put back leaves nothing to wait for", d)
 	}
-	in.HealthyReportPending = true
-	if d := Decide(in); d.Action != Wait {
-		t.Fatalf("got %+v, want Wait until the Healthy report is out", d)
-	}
 }
 
 func TestANewValueRearmsARecoveredGuard(t *testing.T) {

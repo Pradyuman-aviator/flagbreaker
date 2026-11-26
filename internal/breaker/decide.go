@@ -79,9 +79,6 @@ type Input struct {
 	// set again after the incident began: a fix took it away, and a person
 	// put it back.
 	ValueCameBack bool
-	// HealthyReportPending is true while a Healthy report to Feature Health
-	// has failed or waits for other guards of the flag.
-	HealthyReportPending bool
 
 	Pods            workload.Assessment
 	DesiredReplicas int32
@@ -143,10 +140,6 @@ func Decide(in Input) Decision {
 		case newSuspectValue(in.LastChange):
 			// Remote config is read even while the flag is off.
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the flag got a new value, so Flagbreaker is watching it again"}
-		case valueOnly && in.HealthyReportPending:
-			// Re-arming now would make the Healthy report, once it goes out,
-			// say the recovery wasn't verified.
-			return Decision{Mode: in.Mode}
 		case valueOnly && in.FlagDisabledAt == nil:
 			return Decision{Action: Rearm, Mode: in.Mode, Why: "the workload recovered with the new value still in place, so Flagbreaker is watching the flag again"}
 		case valueOnly:
