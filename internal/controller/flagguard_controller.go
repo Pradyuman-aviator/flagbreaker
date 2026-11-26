@@ -23,6 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,12 +56,20 @@ const (
 
 	maxTimeline   = 20
 	notReadyGrace = 20 * time.Second
+	// recentWebhook bounds how old a webhook may be to date a change found
+	// on the first check after Flagbreaker starts.
+	recentWebhook = time.Minute
+
+	// cleanupFinalizer lets Flagbreaker clear Feature Health when a guard is
+	// deleted mid-incident.
+	cleanupFinalizer = "flagbreaker.dev/clear-feature-health"
 )
 
 // +kubebuilder:rbac:groups=flagbreaker.dev,resources=flagguards,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flagbreaker.dev,resources=flagguards/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments;replicasets;statefulsets;daemonsets;controllerrevisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // FlagGuardReconciler reconciles FlagGuards.
@@ -79,12 +88,25 @@ type FlagGuardReconciler struct {
 	// Headlamp or Grafana) for every Feature Health event. It gets
 	// .Namespace, .Kind, .Name and .Guard.
 	WorkloadLink *template.Template
+	// RequireNamespaceOptIn makes a guard act only on environments its
+	// namespace's flagbreaker.dev/allowed-environments annotation lists.
+	RequireNamespaceOptIn bool
 
 	mu        sync.Mutex
 	lastCheck map[types.NamespacedName]time.Time
+	// pending holds a status that couldn't be written, for example after a
+	// conflict. Flagbreaker is the only writer of FlagGuard status, so the
+	// next check starts from it: an incident whose switch-off already
+	// happened in Flagsmith is never forgotten.
+	pending map[types.NamespacedName]pendingStatus
 	// Webhook-triggered checks arrive on this channel.
 	triggers chan event.GenericEvent
 	events   eventsCache
+}
+
+type pendingStatus struct {
+	uid    types.UID
+	status *v1alpha1.FlagGuardStatus
 }
 
 // Reconcile checks one FlagGuard. It runs on every change to the guard or its
@@ -102,7 +124,20 @@ func (r *FlagGuardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, err
 	}
+	if !guard.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, r.finalize(ctx, &guard)
+	}
+	if !controllerutil.ContainsFinalizer(&guard, cleanupFinalizer) {
+		controllerutil.AddFinalizer(&guard, cleanupFinalizer)
+		if err := r.Update(ctx, &guard); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
+
 	before := guard.Status.DeepCopy()
+	if p, ok := r.takePending(req.NamespacedName, guard.UID); ok {
+		guard.Status = *p
+	}
 
 	if err := r.check(ctx, &guard, r.now()); err != nil {
 		logf.FromContext(ctx).Error(err, "check failed")
@@ -115,15 +150,71 @@ func (r *FlagGuardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	metrics.SetPhase(guard.Namespace, guard.Name, guard.Spec.Flag, string(guard.Status.Phase))
 
 	if !equality.Semantic.DeepEqual(before, &guard.Status) {
-		if err := r.Status().Update(ctx, &guard); apierrors.IsConflict(err) {
-			// Someone else wrote the guard since it was read. Check again
-			// from the fresh object; every action is idempotent in Flagsmith.
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		} else if err != nil {
+		if err := r.Status().Update(ctx, &guard); err != nil {
+			// Keep what this check found and did, and write it next time.
+			r.setPending(req.NamespacedName, guard.UID, guard.Status.DeepCopy())
+			if apierrors.IsConflict(err) {
+				// Someone else wrote the guard (its spec or metadata) since
+				// it was read. Check again soon, from the fresh object.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
 	return ctrl.Result{RequeueAfter: r.SyncPeriod}, nil
+}
+
+// finalize runs when a guard is deleted. Mid-incident, its Unhealthy event
+// would otherwise stay in Feature Health (and the flag's Unhealthy tag) for
+// good, so it is cleared, saying why. If Flagsmith can't be reached, deletion
+// waits a little, then goes ahead anyway.
+func (r *FlagGuardReconciler) finalize(ctx context.Context, guard *v1alpha1.FlagGuard) error {
+	if !controllerutil.ContainsFinalizer(guard, cleanupFinalizer) {
+		return nil
+	}
+	st := &guard.Status
+	if st.Phase == v1alpha1.PhaseTripped && st.Environment != "" {
+		others, err := r.otherTrippedGuards(ctx, guard)
+		if err == nil && len(others) == 0 {
+			text := fmt.Sprintf("The FlagGuard %s/%s was deleted during an incident, so Flagbreaker no longer watches this flag for that workload. This is not a verified recovery.",
+				guard.Namespace, guard.Name)
+			if st.Snapshot != nil {
+				text += " Flagbreaker had switched the flag off; switch it back on in Flagsmith once it is safe."
+			}
+			event := flagsmith.HealthEvent{Feature: guard.Spec.Flag, Status: flagsmith.Healthy, Environment: st.Environment}
+			event.Reason.TextBlocks = []flagsmith.TextBlock{{Title: eventTitlePrefix + "FlagGuard deleted", Text: text}}
+			err = r.Flagsmith.ReportHealth(ctx, event)
+		}
+		if err != nil && r.now().Sub(guard.DeletionTimestamp.Time) < 2*time.Minute {
+			return fmt.Errorf("clearing Feature Health before deleting the guard (will retry): %w", err)
+		}
+	}
+	controllerutil.RemoveFinalizer(guard, cleanupFinalizer)
+	if err := r.Update(ctx, guard); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	r.forget(client.ObjectKeyFromObject(guard))
+	return nil
+}
+
+func (r *FlagGuardReconciler) takePending(key types.NamespacedName, uid types.UID) (*v1alpha1.FlagGuardStatus, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.pending[key]
+	delete(r.pending, key)
+	if !ok || p.uid != uid {
+		return nil, false // none, or it was for a deleted guard of the same name
+	}
+	return p.status, true
+}
+
+func (r *FlagGuardReconciler) setPending(key types.NamespacedName, uid types.UID, st *v1alpha1.FlagGuardStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		r.pending = map[types.NamespacedName]pendingStatus{}
+	}
+	r.pending[key] = pendingStatus{uid: uid, status: st}
 }
 
 func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGuard, now time.Time) error {
@@ -131,6 +222,11 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	st := &guard.Status
 	if st.Phase == "" {
 		st.Phase = v1alpha1.PhaseArmed
+	}
+
+	// 0. May this namespace touch that environment at all?
+	if err := r.environmentAllowed(ctx, guard.Namespace, spec.EnvironmentKey); err != nil {
+		return err
 	}
 
 	// 1. Find the flag in Flagsmith, once per spec change.
@@ -149,6 +245,11 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		st.Environment, st.EnvironmentID, st.ProjectID, st.FeatureID = env.Name, env.ID, env.ProjectID, id
 	}
 	flag, err := r.Flagsmith.GetFlag(ctx, spec.EnvironmentKey, st.FeatureID)
+	if errors.Is(err, flagsmith.ErrNotFound) {
+		// The flag was deleted, perhaps to be created again: look it up by
+		// name next time.
+		st.FeatureID = 0
+	}
 	if err != nil {
 		return fmt.Errorf("reading flag %q: %w", spec.Flag, err)
 	}
@@ -198,16 +299,17 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	switch {
 	case st.Phase != v1alpha1.PhaseTripped || st.Mode == "":
 		st.Mode, st.ModeReason = mode, res.Reason
-	case mode == v1alpha1.ModeWatch && st.Mode == v1alpha1.ModeAct:
+	case mode == v1alpha1.ModeWatch && st.Mode == v1alpha1.ModeAct && !s.Unavailable:
 		// A switch to watch in Flagsmith stops an incident from acting
-		// further. The reverse never happens mid-incident.
+		// further. The reverse never happens mid-incident, and a moment of
+		// unreadable settings doesn't count as a switch.
 		st.Mode, st.ModeReason = mode, res.Reason
 	default:
 		mode = st.Mode // finish the incident in the mode it started in
 	}
 
 	// 5. A person asked for the flag to be restored.
-	if handled, err := r.handleRestore(ctx, guard, spec, flag, now); handled || err != nil {
+	if handled, err := r.handleRestore(ctx, guard, spec, flag, assessment, now); handled || err != nil {
 		return err
 	}
 
@@ -225,7 +327,7 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		Now: now, Phase: st.Phase, Mode: mode,
 		FlagEnabled: enabled, LastChange: st.LastFlagChange,
 		Pods: assessment, DesiredReplicas: t.desired, RolloutStartedAt: rolloutAt,
-		Alerts: alerts, HandledEventID: st.HandledEventID, Dismissed: dismissed,
+		Alerts: alerts, AlertsSince: alertsSince(guard), HandledEventID: st.HandledEventID, Dismissed: dismissed,
 		Window: spec.Window.Duration, StableFor: spec.StableFor.Duration, FailingPods: int(spec.FailingPods),
 		FlagDisabledAt: timePtr(st.FlagDisabledAt), HealthySince: timePtr(st.HealthySince),
 	}
@@ -240,16 +342,50 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	case breaker.Recover:
 		return r.recover(ctx, guard, spec, assessment, d, now)
 	case breaker.Rearm:
-		r.rearm(guard, spec, d, now)
+		r.rearm(ctx, guard, spec, assessment, d, now)
 	}
 	return nil
+}
+
+// environmentAllowed checks the namespace's flagbreaker.dev/allowed-environments
+// annotation. Nothing is read from or written to Flagsmith for a guard that
+// fails it.
+func (r *FlagGuardReconciler) environmentAllowed(ctx context.Context, namespace, environmentKey string) error {
+	if !r.RequireNamespaceOptIn {
+		return nil
+	}
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		return fmt.Errorf("reading namespace %q: %w", namespace, err)
+	}
+	for _, k := range splitFlags(ns.Annotations[v1alpha1.AllowedEnvironmentsAnnotation]) {
+		if k == "*" || k == environmentKey {
+			return nil
+		}
+	}
+	return fmt.Errorf("namespace %s may not act on this Flagsmith environment: a cluster admin has to list its key in the %s annotation of the namespace (or \"*\" for any)",
+		namespace, v1alpha1.AllowedEnvironmentsAnnotation)
+}
+
+// alertsSince is when an alert must have started to be about the flag as
+// it is now: the latest switch-on, or when the guard was created.
+func alertsSince(guard *v1alpha1.FlagGuard) time.Time {
+	since := guard.CreationTimestamp.Time
+	if c := guard.Status.LastFlagChange; c != nil && c.Enabled && c.At.After(since) {
+		since = c.At.Time
+	}
+	return since
 }
 
 // resetForNewFlag starts over when a guard's spec now points at another flag
 // or environment: nothing about the old one applies.
 func resetForNewFlag(st *v1alpha1.FlagGuardStatus, spec v1alpha1.FlagGuardSpec, environment string, now time.Time) {
+	msg := fmt.Sprintf("Now guarding %s in %s; the previous flag's state was dropped", spec.Flag, environment)
+	if st.Snapshot != nil {
+		msg += fmt.Sprintf(". Flagbreaker had switched off feature %d in %s; turn it back on in Flagsmith if it should be on", st.FeatureID, st.Environment)
+	}
 	*st = v1alpha1.FlagGuardStatus{Phase: v1alpha1.PhaseArmed, Conditions: st.Conditions}
-	addTimeline(st, now, "GuardChanged", fmt.Sprintf("Now guarding %s in %s; the previous flag's state was dropped", spec.Flag, environment))
+	addTimeline(st, now, "GuardChanged", msg)
 }
 
 // trackFlag records a change to the flag's environment default and returns
@@ -269,28 +405,30 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 		return nil
 	}
 	if *st.FlagEnabled == enabled {
-		r.enrich(guard)
+		r.enrich(guard, a)
 		return nil
 	}
 	st.FlagEnabled = &enabled
 
-	// The change happened after the previous check. If the webhook is
-	// already here, it says exactly when, and who made it.
-	at := now.Add(-r.SyncPeriod)
-	if seen && prev.After(at) {
-		at = prev
+	// The change happened after the previous check, which may be long ago
+	// if checks failed in between. If the webhook is already here, it says
+	// exactly when, and who made it.
+	change := &v1alpha1.FlagChange{At: metav1.NewTime(prev), Enabled: enabled}
+	if !seen {
+		// The first check since Flagbreaker started: the change happened
+		// while it wasn't running, at a time it can't know.
+		change.At, change.TimeUnknown = metav1.NewTime(now), true
 	}
-	change := &v1alpha1.FlagChange{At: metav1.NewTime(at), Enabled: enabled}
-	if c, ok := r.Changes.Latest(st.Environment, guard.Spec.Flag, enabled); ok && matches(c, at, now, r.SyncPeriod) {
-		change.At, change.ChangedBy = metav1.NewTime(c.At), c.ChangedBy
+	from := prev
+	if !seen {
+		from = now.Add(-recentWebhook)
+	}
+	if c, ok := r.Changes.Latest(st.Environment, guard.Spec.Flag, enabled); ok && matches(c, from, now, r.SyncPeriod) {
+		change.At, change.ChangedBy, change.TimeUnknown = metav1.NewTime(c.At), c.ChangedBy, false
 	}
 	// Was it failing just before? Old crashes stay in pod status long after
 	// a pod recovers, so look back only a little.
-	lookback := withDefaults(guard.Spec).StableFor.Duration
-	if lookback < time.Minute {
-		lookback = time.Minute
-	}
-	change.WorkloadWasFailing = enabled && len(a.FailingBetween(change.At.Add(-lookback), change.At.Time)) > 0
+	change.WorkloadWasFailing = enabled && len(a.FailingBetween(change.At.Add(-lookback(withDefaults(guard.Spec))), change.At.Time)) > 0
 	st.LastFlagChange = change
 	return change
 }
@@ -298,10 +436,18 @@ func (r *FlagGuardReconciler) trackFlag(guard *v1alpha1.FlagGuard, enabled bool,
 // enrich adds a webhook's exact time and author to a change that polling saw
 // first. Flagsmith sends FLAG_UPDATED a few seconds after the change, from a
 // background task, so polling often wins the race.
-func (r *FlagGuardReconciler) enrich(guard *v1alpha1.FlagGuard) {
+func (r *FlagGuardReconciler) enrich(guard *v1alpha1.FlagGuard, a workload.Assessment) {
 	st := &guard.Status
+	// A change first seen after a restart gets its real time from a webhook;
+	// whether the workload was failing before it is then checked again.
+	if c := st.LastFlagChange; c != nil && c.TimeUnknown {
+		if w, ok := r.Changes.Latest(st.Environment, guard.Spec.Flag, c.Enabled); ok && matches(w, c.At.Add(-recentWebhook), c.At.Add(r.SyncPeriod), r.SyncPeriod) {
+			c.At, c.ChangedBy, c.TimeUnknown = metav1.NewTime(w.At), w.ChangedBy, false
+			c.WorkloadWasFailing = c.Enabled && len(a.FailingBetween(c.At.Add(-lookback(withDefaults(guard.Spec))), c.At.Time)) > 0
+		}
+	}
 	for _, c := range []*v1alpha1.FlagChange{st.LastFlagChange, st.Trigger} {
-		if c == nil || c.ChangedBy != "" {
+		if c == nil || c.ChangedBy != "" || c.TimeUnknown {
 			continue
 		}
 		w, ok := r.Changes.Latest(st.Environment, guard.Spec.Flag, c.Enabled)
@@ -341,6 +487,7 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 	}
 	st.TrippedAt = metaNow(now)
 	st.FlagDisabledAt, st.FlagDisabledBy, st.RecoveredAt, st.HealthySince = nil, "", nil, nil
+	st.ReportedEventID = 0
 	// Alerts that are active now belong to this incident; none of them may
 	// trip the guard again once it is re-armed.
 	for _, al := range alerts {
@@ -363,6 +510,11 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 			addTimeline(st, c.At.Time, "FlagChanged", describeChange(spec.Flag, st.Environment, c))
 			metrics.Observe(metrics.DetectionSeconds, now.Sub(c.At.Time), spec.Flag, st.Environment)
 		}
+	}
+	// A change is blamed for one incident only, so a workload that heals
+	// with the flag still on (watch mode) isn't tripped again by it.
+	if st.LastFlagChange != nil && st.LastFlagChange.Enabled {
+		st.LastFlagChange.Tripped = true
 	}
 	if d.Cause == breaker.CauseAlert {
 		addTimeline(st, now, "Tripped", fmt.Sprintf("Tripped for %s %s/%s: %s", t.kind, guard.Namespace, t.obj.GetName(), d.Why))
@@ -389,14 +541,22 @@ func (r *FlagGuardReconciler) switchOff(ctx context.Context, guard *v1alpha1.Fla
 	st := &guard.Status
 	segments := flag.EnabledSegmentIDs()
 
+	// Remember what is about to be switched off first. If the request times
+	// out after Flagsmith applied it, a restore can still undo it. Overrides
+	// still off from an earlier incident stay in the snapshot too.
+	var pending []int64
+	if st.Snapshot != nil {
+		pending = st.Snapshot.EnabledSegmentOverrides
+	}
+	st.Snapshot = &v1alpha1.FlagSnapshot{Enabled: flag.EnvironmentDefault.Enabled || (st.Snapshot != nil && st.Snapshot.Enabled),
+		EnabledSegmentOverrides: union(pending, segments)}
+
 	_, err := r.Flagsmith.SwitchOff(ctx, spec.EnvironmentKey, st.FeatureID, segments)
-	if err != nil && !errors.Is(err, flagsmith.ErrChangeRequestsEnabled) && len(segments) > 0 {
-		// An experiment's override can't be changed through this API. Switch
-		// off the environment default at least, and say what was left on.
-		if _, retryErr := r.Flagsmith.SwitchOff(ctx, spec.EnvironmentKey, st.FeatureID, nil); retryErr == nil {
-			addTimeline(st, now, "SegmentsLeftOn", fmt.Sprintf("Couldn't switch off the segment overrides (%v); they still serve the flag", err))
-			segments, err = nil, nil
-		}
+	if flagsmith.IsRejected(err) && len(segments) > 0 {
+		// Flagsmith refused the whole change, typically because one override
+		// belongs to an experiment, which this API can't change. Switch off
+		// the default, then each override on its own, and say what stayed on.
+		segments, err = r.switchOffOneByOne(ctx, guard, spec, segments, now)
 	}
 	switch {
 	case errors.Is(err, flagsmith.ErrChangeRequestsEnabled):
@@ -414,13 +574,6 @@ func (r *FlagGuardReconciler) switchOff(ctx context.Context, guard *v1alpha1.Fla
 	off := false
 	st.FlagEnabled = &off
 	st.FlagDisabledAt, st.FlagDisabledBy = metaNow(now), ChangedByFlagbreaker
-	// Overrides still off from an earlier incident stay in the snapshot, so a
-	// restore turns them back on too.
-	var pending []int64
-	if st.Snapshot != nil {
-		pending = st.Snapshot.EnabledSegmentOverrides
-	}
-	st.Snapshot = &v1alpha1.FlagSnapshot{Enabled: flag.EnvironmentDefault.Enabled, EnabledSegmentOverrides: union(pending, segments)}
 	st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: false, ChangedBy: ChangedByFlagbreaker}
 	what := "its environment default"
 	if n := len(segments); n > 0 {
@@ -435,6 +588,38 @@ func (r *FlagGuardReconciler) switchOff(ctx context.Context, guard *v1alpha1.Fla
 	}
 	r.restartCrashed(ctx, guard, spec, a, now)
 	return nil
+}
+
+// switchOffOneByOne switches off the environment default, then each segment
+// override separately. It returns the overrides it switched off; the ones
+// Flagsmith refused are named in the timeline and left out of the snapshot.
+func (r *FlagGuardReconciler) switchOffOneByOne(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec,
+	segments []int64, now time.Time) ([]int64, error) {
+	st := &guard.Status
+	if _, err := r.Flagsmith.SwitchOff(ctx, spec.EnvironmentKey, st.FeatureID, nil); err != nil {
+		return nil, err
+	}
+	var done, refused []int64
+	for _, id := range segments {
+		off := false
+		if _, err := r.Flagsmith.UpdateFlag(ctx, spec.EnvironmentKey, st.FeatureID, flagsmith.Update{Default: &off, Segments: []int64{id}}); err != nil {
+			refused = append(refused, id)
+			continue
+		}
+		done = append(done, id)
+	}
+	if len(refused) > 0 {
+		var kept []int64
+		for _, id := range st.Snapshot.EnabledSegmentOverrides {
+			if !contains(refused, id) {
+				kept = append(kept, id)
+			}
+		}
+		st.Snapshot.EnabledSegmentOverrides = kept
+		addTimeline(st, now, "SegmentsLeftOn", fmt.Sprintf("Flagsmith refused to switch off the override%s for segment%s %s (an experiment's overrides can't be changed this way); %s still serve%s the flag",
+			plural(len(refused)), plural(len(refused)), joinIDs(refused), itThey(len(refused)), sIfOne(len(refused))))
+	}
+	return done, nil
 }
 
 // personSwitchedOff records that a person switched the flag off during an
@@ -514,23 +699,33 @@ func (r *FlagGuardReconciler) recover(ctx context.Context, guard *v1alpha1.FlagG
 		metrics.Observe(metrics.RecoverySeconds, now.Sub(st.FlagDisabledAt.Time), spec.Flag, st.Environment)
 	}
 
-	// Feature Health keeps one status per flag and environment, so Healthy
-	// waits until every guard of this flag has recovered.
+	return r.reportHealthy(ctx, guard, spec, a, now)
+}
+
+// reportHealthy reports Healthy, unless another guard of this flag in this
+// environment is still tripped: Feature Health keeps one status per flag and
+// environment. Until then the Reported condition stays False, so every check
+// tries again.
+func (r *FlagGuardReconciler) reportHealthy(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, a workload.Assessment, now time.Time) error {
 	others, err := r.otherTrippedGuards(ctx, guard)
 	if err != nil {
 		return err
 	}
 	if len(others) > 0 {
-		addTimeline(st, now, "HealthyNotReported",
-			fmt.Sprintf("Not reporting Healthy yet: %s still tripped for this flag", strings.Join(others, ", ")))
+		msg := fmt.Sprintf("Not reporting Healthy yet: %s still tripped for this flag", strings.Join(others, ", "))
+		if c := meta.FindStatusCondition(guard.Status.Conditions, conditionReported); c == nil || c.Reason != "WaitingForOtherGuards" {
+			addTimeline(&guard.Status, now, "HealthyNotReported", msg)
+		}
+		setCondition(guard, conditionReported, metav1.ConditionFalse, "WaitingForOtherGuards", msg)
 		return nil
 	}
 	r.report(ctx, guard, spec, flagsmith.Healthy, a)
 	return nil
 }
 
-func (r *FlagGuardReconciler) rearm(guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, d breaker.Decision, now time.Time) {
+func (r *FlagGuardReconciler) rearm(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, a workload.Assessment, d breaker.Decision, now time.Time) {
 	st := &guard.Status
+	wasTripped := st.Phase == v1alpha1.PhaseTripped
 	if d.Acknowledge && st.LastFlagChange != nil {
 		st.LastFlagChange.Acknowledged = true
 	}
@@ -550,12 +745,17 @@ func (r *FlagGuardReconciler) rearm(guard *v1alpha1.FlagGuard, spec v1alpha1.Fla
 				n, plural(n), isAre(n), restoreHint(guard)))
 		}
 	}
+	// A person took over before recovery was verified (a dismissal already
+	// wrote Healthy itself): clear Flagbreaker's Unhealthy event, saying so.
+	if wasTripped && !d.Acknowledge {
+		r.reportHealthy(ctx, guard, spec, a, now) //nolint:errcheck // a failure leaves Reported False and is retried
+	}
 }
 
 // handleRestore applies a new flagbreaker.dev/restore annotation. It turns
 // back on what Flagbreaker switched off, but only overrides that still exist
 // and are still off: a person's later change always wins.
-func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, flag flagsmith.Flag, now time.Time) (bool, error) {
+func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec, flag flagsmith.Flag, a workload.Assessment, now time.Time) (bool, error) {
 	st := &guard.Status
 	want := guard.Annotations[v1alpha1.RestoreAnnotation]
 	if want == "" || want == st.RestoreRequest {
@@ -615,15 +815,26 @@ func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1
 	}
 	st.Snapshot = nil
 	if turnOn {
+		// The restore is a flag change like any other: if the workload
+		// breaks again, the breaker trips again. If it is failing already
+		// (say, still crash-looping after a dismissal), the restore isn't
+		// blamed for that. Crashes from before a verified recovery belong to
+		// the incident, not to now: Kubernetes keeps a pod's last crash.
+		since := now.Add(-lookback(spec))
+		if st.RecoveredAt != nil {
+			if healthyFrom := st.RecoveredAt.Add(-spec.StableFor.Duration); healthyFrom.After(since) {
+				since = healthyFrom
+			}
+		}
+		failing := len(a.FailingBetween(since, now)) > 0
+
 		on := true
 		st.FlagEnabled = &on
 		st.Phase = v1alpha1.PhaseArmed
 		st.TrippedAt, st.FlagDisabledAt, st.FlagDisabledBy, st.HealthySince, st.RecoveredAt = nil, nil, "", nil, nil
 		st.Trigger, st.Alert = nil, nil
 		meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
-		// The restore is a flag change like any other: if the workload
-		// breaks again, the breaker trips again.
-		st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: true, ChangedBy: ChangedByRestore}
+		st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: true, ChangedBy: ChangedByRestore, WorkloadWasFailing: failing}
 	}
 	msg := fmt.Sprintf("Restored %s in %s: turned %s back on, as the %s annotation asked. Flagbreaker is watching it; a new breakage trips it again.",
 		spec.Flag, st.Environment, strings.Join(parts, " and "), v1alpha1.RestoreAnnotation)
@@ -654,12 +865,21 @@ func (r *FlagGuardReconciler) healthSignals(ctx context.Context, guard *v1alpha1
 		}
 		switch {
 		case isOwnEvent(e):
-			continue
+			// Remember the ID of this incident's Unhealthy event, so a
+			// dismissal is recognised by a newer ID, whatever the clocks say.
+			if e.Unhealthy() && st.Phase == v1alpha1.PhaseTripped && e.ID > st.ReportedEventID {
+				st.ReportedEventID = e.ID
+			}
 		case e.ProviderName == flagsmith.ProviderWebhook && !e.Unhealthy() && strings.HasPrefix(e.FirstText(), flagsmith.DismissedPrefix):
 			// Dismissing Flagbreaker's event writes a Healthy event into
 			// the Webhook provider's slot.
-			if st.Phase == v1alpha1.PhaseTripped && st.TrippedAt != nil && e.CreatedAt.After(st.TrippedAt.Time) {
-				dismissed = true
+			if st.Phase != v1alpha1.PhaseTripped {
+				break
+			}
+			if st.ReportedEventID != 0 {
+				dismissed = e.ID > st.ReportedEventID
+			} else if st.TrippedAt != nil && e.CreatedAt.After(st.TrippedAt.Time) {
+				dismissed = true // dismissed before Flagbreaker saw its own event
 			}
 		case e.Unhealthy() && *spec.FollowHealthEvents:
 			alerts = append(alerts, breaker.Alert{EventID: e.ID, Provider: e.ProviderName, Title: e.Title(), At: e.CreatedAt})
@@ -681,7 +901,7 @@ func (r *FlagGuardReconciler) reportPhase(ctx context.Context, guard *v1alpha1.F
 	case v1alpha1.PhaseTripped:
 		r.report(ctx, guard, spec, flagsmith.Unhealthy, a)
 	case v1alpha1.PhaseRecovered:
-		r.report(ctx, guard, spec, flagsmith.Healthy, a)
+		r.reportHealthy(ctx, guard, spec, a, r.now()) //nolint:errcheck // retried next check
 	default:
 		meta.RemoveStatusCondition(&guard.Status.Conditions, conditionReported)
 	}

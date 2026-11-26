@@ -83,6 +83,12 @@ func (r *AnnotationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if problem != "" {
 		r.Recorder.Eventf(obj, nil, corev1.EventTypeWarning, "InvalidFlagbreakerAnnotation", "Annotate", "%s", problem)
 	}
+	if desired == nil {
+		// The flags are listed but can't be guarded as configured, for
+		// example with no environment key after a reinstall. Leave the
+		// existing guards alone rather than delete them mid-incident.
+		return ctrl.Result{}, nil
+	}
 
 	var existing v1alpha1.FlagGuardList
 	if err := r.List(ctx, &existing, client.InNamespace(obj.GetNamespace()), client.MatchingLabels{LabelGenerated: "true"}); err != nil {
@@ -143,7 +149,7 @@ func (r *AnnotationReconciler) desiredGuards(obj client.Object) (map[string]*v1a
 		key = r.DefaultEnvironmentKey
 	}
 	if key == "" {
-		return out, fmt.Sprintf("%s is set but there is no Flagsmith environment key: set %s, or the controller's --default-environment-key",
+		return nil, fmt.Sprintf("%s is set but there is no Flagsmith environment key: set %s, or the controller's --default-environment-key",
 			AnnotationFlags, AnnotationEnvironmentKey)
 	}
 

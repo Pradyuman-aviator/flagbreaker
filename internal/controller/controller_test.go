@@ -53,6 +53,9 @@ type fakeFlagsmith struct {
 	events    []fakeEvent
 	nextEvent int64
 	clock     func() time.Time
+	// experimentSegment is a system segment: any PATCH that lists it is
+	// refused with 409, as Flagsmith refuses changes to experiments.
+	experimentSegment int64
 }
 
 type fakeEvent struct {
@@ -90,6 +93,13 @@ func (f *fakeFlagsmith) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} `json:"segment_overrides"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, s := range body.Segments {
+			if f.experimentSegment != 0 && s.Segment.ID == f.experimentSegment {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"detail": "System segment overrides can't be modified.", "code": "system_segment_modification"}`))
+				return
+			}
+		}
 		f.patches++
 		if body.Default != nil {
 			f.def = body.Default.Enabled

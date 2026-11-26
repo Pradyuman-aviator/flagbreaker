@@ -153,6 +153,12 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 	}
 	var summary string
 	switch {
+	case status == flagsmith.Healthy && st.Phase == v1alpha1.PhaseArmed:
+		summary = "A person turned the flag back on before Flagbreaker verified recovery, so Flagbreaker is watching it again. " +
+			"This is not a verified recovery: if the workload breaks again, the breaker trips again."
+		if pendingSegments(st) > 0 {
+			summary += " " + restoreHint(guard) + "."
+		}
 	case status == flagsmith.Healthy:
 		summary = "The workload is verified healthy again. " + timings(st)
 		if st.Snapshot != nil {
@@ -213,6 +219,47 @@ func union(a, b []int64) []int64 {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// lookback is how far before a change Flagbreaker looks to decide whether
+// the workload was failing already: Kubernetes keeps a container's last
+// crash long after it recovers, so not far.
+func lookback(spec v1alpha1.FlagGuardSpec) time.Duration {
+	if spec.StableFor != nil && spec.StableFor.Duration > time.Minute {
+		return spec.StableFor.Duration
+	}
+	return time.Minute
+}
+
+func contains(ids []int64, id int64) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+func joinIDs(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprint(id)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func itThey(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "they"
+}
+
+func sIfOne(n int) string {
+	if n == 1 {
+		return "s"
+	}
+	return ""
 }
 
 func labelSet(m map[string]string) labels.Set { return labels.Set(m) }
