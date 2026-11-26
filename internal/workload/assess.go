@@ -30,14 +30,23 @@ type Assessment struct {
 	CrashLooping []string
 }
 
+// StartupGrace: a pod that is not ready within this long of being created is
+// taken to be still starting, however slow (a JVM, a big image), and "not
+// ready" doesn't count against it. If it crashes, that still counts at once.
+// A flag that breaks readiness also makes the pods that were ready go not
+// ready, and those count.
+const StartupGrace = time.Minute
+
 // Assess looks at the pods of one workload. A pod has a problem when a
 // container exited with an error (or was OOM-killed), or when the pod has been
-// not ready for at least notReadyGrace.
+// not ready for at least notReadyGrace after it had started up. Pods that
+// finished (Succeeded), were evicted or lost (Failed), or are being deleted
+// are left out: their replacements are what matters.
 func Assess(pods []corev1.Pod, now time.Time, notReadyGrace time.Duration) Assessment {
 	var a Assessment
 	for i := range pods {
 		pod := &pods[i]
-		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
 		a.Pods++
@@ -64,7 +73,7 @@ func Assess(pods []corev1.Pod, now time.Time, notReadyGrace time.Duration) Asses
 		ready := podReady(pod)
 		if ready != nil && ready.Status == corev1.ConditionTrue {
 			a.Ready++
-		} else if ready != nil && now.Sub(ready.LastTransitionTime.Time) >= notReadyGrace {
+		} else if ready != nil && now.Sub(ready.LastTransitionTime.Time) >= notReadyGrace && startedUp(pod, ready) {
 			// Only a crash explains more than "not ready", so prefer it.
 			if latest == nil {
 				keep(Problem{
@@ -120,6 +129,22 @@ func (a Assessment) HealthySince(t time.Time, desired int32) bool {
 		return true
 	}
 	return a.Pods > 0 && a.Ready >= int(desired)
+}
+
+// startedUp reports whether a not-ready pod is past its start-up: it went
+// not ready well after it was created (so it was ready before), or it has
+// restarted.
+func startedUp(pod *corev1.Pod, ready *corev1.PodCondition) bool {
+	created := pod.CreationTimestamp.Time
+	if created.IsZero() || ready.LastTransitionTime.Sub(created) >= StartupGrace {
+		return true
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.RestartCount > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func isCrash(t *corev1.ContainerStateTerminated) bool {

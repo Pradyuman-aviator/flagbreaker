@@ -91,6 +91,40 @@ func TestNotReadyCountsOnlyAfterGrace(t *testing.T) {
 	}
 }
 
+func TestASlowNewPodIsNotFailing(t *testing.T) {
+	// Created at 0, not ready since 2s, no restarts: still starting up, even
+	// minutes later.
+	p := readyPod("scale-up")
+	p.CreationTimestamp = at(0)
+	p.Status.Conditions[0] = corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: at(2 * time.Second)}
+	if a := Assess([]corev1.Pod{p}, t0.Add(5*time.Minute), 20*time.Second); len(a.Problems) != 0 || a.Ready != 0 {
+		t.Fatalf("got %+v, want no problems and not ready", a)
+	}
+	// The same pod after a restart is failing.
+	p.Status.ContainerStatuses[0].RestartCount = 1
+	if a := Assess([]corev1.Pod{p}, t0.Add(5*time.Minute), 20*time.Second); len(a.Problems) != 1 {
+		t.Fatalf("got %+v, want one problem after a restart", a)
+	}
+	// A pod that was ready for a while and then went not ready is failing.
+	q := readyPod("old")
+	q.CreationTimestamp = at(-time.Hour)
+	q.Status.Conditions[0] = corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: at(0)}
+	if a := Assess([]corev1.Pod{q}, t0.Add(30*time.Second), 20*time.Second); len(a.Problems) != 1 {
+		t.Fatalf("got %+v, want the old pod failing", a)
+	}
+}
+
+func TestEvictedPodsAreIgnored(t *testing.T) {
+	p := readyPod("evicted")
+	p.Status.Phase = corev1.PodFailed
+	p.Status.Reason = "Evicted"
+	p.Status.Conditions[0].Status = corev1.ConditionFalse
+	a := Assess([]corev1.Pod{p, readyPod("b")}, t0, time.Second)
+	if a.Pods != 1 || !a.HealthySince(t0, 1) {
+		t.Fatalf("got %+v, want the evicted pod left out", a)
+	}
+}
+
 func TestDeletingPodsAreIgnored(t *testing.T) {
 	p := crashLoopingPod("a", time.Second)
 	now := metav1.NewTime(t0)
