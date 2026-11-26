@@ -1,9 +1,11 @@
 # Flagbreaker
 
 **A circuit breaker for Flagsmith flags on Kubernetes.** When a workload breaks
-right after a flag is switched on, Flagbreaker:
+right after a flag is switched on, or given a new remote config value,
+Flagbreaker:
 - reports it to [Flagsmith Feature Health](https://docs.flagsmith.com/advanced-use/feature-health);
-- switches the flag off (in act mode);
+- in act mode, switches the flag off, or for a bad value, puts the previous
+  value back;
 - restarts the crashed pods;
 - confirms on the cluster that the workload recovered.
 
@@ -18,7 +20,8 @@ right after a flag is switched on, Flagbreaker:
 - the [CI runs](https://github.com/Pradyuman-aviator/flagbreaker/actions/workflows/ci.yml). On every push to main and every pull request, an end-to-end job brings up kind, self-hosted Flagsmith and Flagbreaker from scratch, breaks the demo app and checks the recovery;
 - the [real incident timeline](#try-it) below.
 
-A flag flip changes production without a deploy:
+A flag flip, or a new remote config value, changes production without a
+deploy:
 - **Rollout tools can't see it.** Argo Rollouts and Flagger watch new
   ReplicaSets, and a flag flip creates none.
 - **Nothing in open-source Flagsmith acts on it.** Flagsmith records
@@ -42,6 +45,7 @@ git clone https://github.com/Pradyuman-aviator/flagbreaker && cd flagbreaker
 bash hack/demo/up.sh        # kind + self-hosted Flagsmith + Flagbreaker + a demo shop; ~8 min the first time
 bash hack/demo/watch.sh     # in a second terminal: a live view of flags, pods, guards and Feature Health
 bash hack/demo/break.sh     # switch new_pricing on, the way a person would
+bash hack/demo/break.sh checkout_config   # or give checkout_config a value the shop can't parse
 bash hack/demo/down.sh      # delete it all
 ```
 
@@ -55,17 +59,18 @@ Open three things side by side and watch one incident:
 |---|---|
 | `hack/demo/up.sh` | Brings up everything. Safe to re-run. |
 | `hack/demo/watch.sh` | Live terminal view: what Flagsmith serves, the shop, the pods, each guard's phase and last step, and Feature Health. |
-| `hack/demo/break.sh [flag] [on\|off]` | Switches a flag the way a person would, with the admin's token, so Flagsmith records who did it. |
+| `hack/demo/break.sh [flag] [on\|off]` | Switches a flag the way a person would, with the admin's token, so Flagsmith records who did it. `break.sh checkout_config` sets a value the shop can't parse instead; `break.sh checkout_config good` puts the good one back. |
 | `hack/demo/alert.sh fire\|resolve` | Sends a Grafana / Alertmanager alert for `express_checkout` to Flagsmith. |
 | `hack/demo/restore.sh` | Asks Flagbreaker to put the flag back as it was. |
-| `hack/demo/e2e-all.sh` | Every scenario, checked end to end, in about 3 minutes: act mode with a restore, watch mode set from Flagsmith, and a Grafana alert. |
+| `hack/demo/e2e-all.sh` | Every scenario, checked end to end, in about 4 minutes: act mode with a restore, watch mode set from Flagsmith, a Grafana alert, and a bad remote config value put back. |
 | `hack/demo/down.sh` | Deletes the cluster and the local state. |
 
 `up.sh` builds the whole demo through Flagsmith's API, with no clicks in the
 dashboard:
 - self-hosted Flagsmith 2.295.2, from its official Helm chart;
 - an organisation, a project and a Production environment;
-- the flags, a segment, two Feature Health providers and a signed webhook;
+- the flags (one of them, `checkout_config`, is remote config), a segment, two
+  Feature Health providers and a signed webhook;
 - Flagbreaker, from the Helm chart in this repo;
 - `checkout`, a small Go app that reads its flags with the Flagsmith SDK.
 
@@ -99,6 +104,7 @@ Flagbreaker has nothing to watch, nothing to switch and nowhere to report.
 | Flagsmith feature | What Flagbreaker does with it |
 |---|---|
 | Flags, through `/api/__future__/environments/{key}/features/{id}/` | Reads the flag. Switches off the environment default and every segment override that is on, in one versioned change; if Flagsmith refuses that, for example because of an experiment's override, one change per override. A restore turns them back on. |
+| Remote config (flag values) | Notices when the environment default gets a new value, such as a JSON config. If the workload breaks right after, puts the previous value back and leaves the flag on: the SDK's `GetFeatureValue` returns a value whether or not the flag is on, so switching it off wouldn't help. |
 | Feature Health, Webhook provider | Reports Unhealthy and Healthy with the incident timeline, the failing pods and runbook links, which show in the flag's Health tab and as the Unhealthy tag. |
 | Feature Health events (the Grafana / Prometheus Alertmanager provider, or any other) | Trips on another provider's alert for the flag. Waits for the alert to clear before calling the workload recovered. Treats a person's **Dismiss** as an acknowledgement. |
 | Environment webhooks (`FLAG_UPDATED`, HMAC-SHA256 signed) | Learns exactly when a flag changed and who changed it. |
@@ -213,7 +219,8 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
   - the Kubernetes cluster and the pods crashing;
   - the switch-off, the pod restarts and the recovery check.
 - **Staged:**
-  - The demo app's bug: `checkout` exits while `new_pricing` is on.
+  - The demo app's bugs: `checkout` exits while `new_pricing` is on, and when
+    `checkout_config` holds a value it can't parse.
   - The Grafana alert, which `hack/demo/alert.sh` posts to Flagsmith's
     Grafana provider in the format Alertmanager uses. There's no Prometheus
     in the demo.
@@ -240,7 +247,7 @@ stateDiagram-v2
   Armed --> Tripped: pods fail after a switch-on, or another provider's alert fires
   Tripped --> Recovered: pods healthy for stableFor and no alert firing
   Tripped --> Armed: a person re-enables the flag or dismisses the incident
-  Recovered --> Armed: the flag is on again
+  Recovered --> Armed: the flag is on again, or at once after a bad value was put back
 ```
 
 - **The decisions** live in one pure function,
@@ -250,7 +257,7 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 82 Go tests cover the rules, the client, webhook verification,
+- **Tests.** 97 Go tests cover the rules, the client, webhook verification,
   and whole incidents run through `Reconcile` against a fake Flagsmith,
   including one per bug that two independent code reviews found. On every
   push to main and every pull request, CI runs them, plus an end-to-end job
@@ -263,8 +270,11 @@ stateDiagram-v2
 
 ## Limitations
 
-- **Only the environment default is tracked as a flag change.** A rollout
-  through a segment override alone is caught only by an alert.
+- **Only the environment default is tracked: switching it, and changing its
+  value.** A rollout through a segment override alone, such as a `% Split`
+  segment, isn't tracked, and other providers' alerts trip a guard only while
+  the environment default is on. Values of segment overrides and multivariate
+  weights aren't tracked either.
 - **Identity overrides and experiments are never switched off.** The timeline
   says so.
 - **Who made a change can be missing.** Flagsmith sends `FLAG_UPDATED` with

@@ -2,12 +2,14 @@
 
 Flagbreaker is a Kubernetes controller that connects Kubernetes workload
 health to [Flagsmith Feature Health](https://docs.flagsmith.com/advanced-use/feature-health).
-When a workload breaks right after a flag is switched on, or another Feature
-Health provider marks the flag unhealthy, Flagbreaker:
+When a workload breaks right after a flag is switched on or given a new
+value, or another Feature Health provider marks the flag unhealthy,
+Flagbreaker:
 
 1. reports Unhealthy to Feature Health, with an incident timeline;
 2. in act mode, switches the flag off in that environment, for its default
-   and every segment override that is on;
+   and every segment override that is on. If a new value caused it, it puts
+   the previous value back instead;
 3. restarts the pods that crashed;
 4. confirms recovery on the cluster and reports Healthy.
 
@@ -64,14 +66,16 @@ stateDiagram-v2
   Armed --> Tripped: pods fail after the flag is switched on,<br/>or another provider's alert fires
   Tripped --> Recovered: all pods ready, no new crash for stableFor,<br/>and no alert still firing
   Tripped --> Armed: a person turns the flag back on,<br/>or dismisses the incident in Flagsmith
-  Recovered --> Armed: the flag is on again<br/>(by a person, or the restore annotation)
+  Recovered --> Armed: the flag is on again<br/>(by a person, or the restore annotation),<br/>or at once after a bad value was put back
 ```
 
 **Trips (Armed → Tripped).** The flag's environment default is on and one of
 these holds:
 
-- **Pods**: the flag was switched on within `window` (10 minutes by default),
-  and at least `failingPods` pods failed after that. A container that exited
+- **Pods**: the flag was switched on, or its environment default got a new
+  value, within `window` (10 minutes by default), and at least `failingPods`
+  pods failed after that. A new value counts even while the flag is off,
+  because apps read remote config either way. A container that exited
   non-zero or was OOM-killed counts as failing, and so does a pod that was
   ready and then stayed not ready for 20 s. A pod that is not ready within a
   minute of being created, with no restarts, is still starting up and doesn't
@@ -96,6 +100,8 @@ these holds:
   a `FLAG_UPDATED` webhook says when it happened.
 - An alert event already handled. A person who re-enables a flag despite an
   old alert is respected.
+- Flagbreaker's own changes. A crash after it put a value back belongs to
+  the incident; blaming the fix would put the bad value back.
 
 **Recovery is verified.** For `stableFor` after the switch-off, every pod must
 be ready with no new crash, and no other provider's alert may still be firing.
@@ -103,6 +109,17 @@ A successful API call proves nothing about the workload, so Flagbreaker checks
 the workload itself. With `restartCrashingPods`, the pods that crashed are
 deleted once the flag is off. They then come back in seconds, not after the
 kubelet's back-off, which can reach five minutes.
+
+**A bad value is put back, not switched off.** Remote config is read
+whether or not the flag is on: the Flagsmith Go SDK's `GetFeatureValue`
+returns the value without looking at `enabled`. So when a new value caused
+the incident, act mode sets the environment default's value back to what it
+was, in one versioned change, and leaves the flag on or off as it was. It
+does that only while the flag still has the value that caused it; a person's
+later change stands. In watch mode, a person setting any other value counts
+as the fix, as a switch-off does for a switch-on; switching the flag off
+doesn't. After verified recovery there is nothing left to wait for, so the
+guard is armed again at once.
 
 **Restore.** The `flagbreaker.dev/restore` annotation undoes Flagbreaker's
 own switch-off. It turns on the environment default and only the segment
@@ -144,10 +161,10 @@ against 2.295.2.
 |---|---|---|
 | `GET /api/v1/environments/{key}/` | environment name, ID and project | org API key |
 | `GET /api/v1/projects/{id}/features/?search=` | feature ID, matched by exact name | org API key |
-| `GET`/`PATCH /api/__future__/environments/{key}/features/{id}/` | read the flag; switch off the default and segment overrides in one versioned change; restore | org API key |
+| `GET`/`PATCH /api/__future__/environments/{key}/features/{id}/` | read the flag and its value; switch off the default and segment overrides in one versioned change; put a previous value back; restore | org API key |
 | `GET /api/v1/projects/{id}/feature-health/events/` | other providers' alerts, and dismissals of Flagbreaker's own events | org API key |
 | `POST /api/v1/feature-health/{signed-path}` (Webhook provider) | report Unhealthy and Healthy, with text and URL blocks | the signed path |
-| environment webhook `FLAG_UPDATED` (HMAC-SHA256 `X-Flagsmith-Signature`) | exact change time and author | shared secret |
+| environment webhook `FLAG_UPDATED` (HMAC-SHA256 `X-Flagsmith-Signature`) | exact time and author of a switch or a value change | shared secret |
 | Flagsmith Go SDK, `GetEnvironmentFlags` | the breaker's own settings | environment key |
 
 The `__future__` endpoint works with and without feature versioning. The older
@@ -214,11 +231,12 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 |---|---|
 | `flagbreaker_trips_total` | trips, by guard, flag, environment, mode and cause (`pods` or `alert`) |
 | `flagbreaker_switch_offs_total` | switch-offs, by who did it (`flagbreaker` or `person`) |
+| `flagbreaker_value_reverts_total` | bad values changed back, by who did it (`flagbreaker` or `person`) |
 | `flagbreaker_recoveries_total` | verified recoveries |
 | `flagbreaker_restores_total` | restores |
 | `flagbreaker_check_errors_total` | checks that failed |
 | `flagbreaker_detection_seconds` | from the change to the trip |
-| `flagbreaker_switch_off_seconds` | from the trip to the switch-off |
+| `flagbreaker_switch_off_seconds` | from the trip to the switch-off, or to the value being put back |
 | `flagbreaker_recovery_seconds` | from the switch-off to verified recovery |
 | `flagbreaker_guard_phase` | each guard's current phase |
 
@@ -239,9 +257,11 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 
 ## Limitations
 
-- **Only the environment default is tracked as a flag change.** A rollout
-  through a segment override alone doesn't start the pods rule. If those users
-  see errors, follow them with an alert (the alert rule).
+- **Only the environment default is tracked: switching it, and changing its
+  value.** A rollout through a segment override alone, such as a `% Split`
+  segment, doesn't start the pods rule, and the alert rule needs the
+  environment default to be on, so neither catches it. Values of segment
+  overrides and multivariate weights aren't tracked either.
 - **Who changed a flag can be lost.** Flagsmith fills `FLAG_UPDATED` with the
   flag's state when the webhook is sent, a few seconds after the change, not
   at the change. When Flagbreaker switches the flag off within those seconds,

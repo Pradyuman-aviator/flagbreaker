@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: bring up kind, Flagsmith, Flagbreaker and the demo app
         run: bash hack/demo/up.sh
-      - name: act mode, restore, watch mode, Grafana alert
+      - name: act mode, restore, watch mode, Grafana alert, bad remote config value
         run: bash hack/demo/e2e-all.sh
       - name: show what happened
         if: failure()
