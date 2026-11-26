@@ -10,6 +10,33 @@ source "$DEMO_DIR/flagsmith.env"
 guard() { "$KUBECTL" get flagguard "$1" -n shop -o json; }
 phase() { guard "$1" | jq -r '.status.phase // ""'; }
 
+# require_settled_guard NAME: waits until Flagbreaker has checked the guard
+# and it is Armed or Recovered, the states a test starts from. A guard left
+# tripped by an earlier run recovers once its flag is off.
+require_settled_guard() {
+  local name=$1 i p
+  for ((i = 0; i < 150; i++)); do
+    p="$(phase "$name" 2>/dev/null || true)"
+    case "$p" in
+      Armed | Recovered) return 0 ;;
+    esac
+    sleep 1
+  done
+  guard "$name" | jq '.status' >&2 || true
+  die "FlagGuard $name should be Armed or Recovered before the test, is '${p:-unchecked}'"
+}
+
+# reset_demo: new_pricing off and the checkout app up, whatever an earlier
+# (perhaps failed) run left behind.
+reset_demo() {
+  switch "$FLAGSMITH_NEW_PRICING_ID" off
+  if ! "$KUBECTL" wait --for=condition=Available deployment/checkout -n shop --timeout=10s >/dev/null 2>&1; then
+    log "the checkout app is down from an earlier run; restarting its pods"
+    "$KUBECTL" delete pod -n shop -l app=checkout --wait=false >/dev/null
+    "$KUBECTL" rollout status deployment/checkout -n shop --timeout=3m >/dev/null
+  fi
+}
+
 # wait_for_phase GUARD PHASE TIMEOUT_SECONDS
 wait_for_phase() {
   local name=$1 want=$2 timeout=$3 i

@@ -13,10 +13,8 @@ source "$ROOT_DIR/hack/demo/common.sh"
 G=checkout-new-pricing
 ID=$FLAGSMITH_NEW_PRICING_ID
 
-case "$(phase $G)" in
-  Armed | Recovered) ;;
-  *) die "FlagGuard $G should be Armed or Recovered before the test, is $(phase $G)" ;;
-esac
+reset_demo
+require_settled_guard $G
 wait_for_settled_rollout
 trap 'set_value "$FLAGSMITH_POLICY_ID" "{}"' EXIT
 

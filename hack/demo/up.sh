@@ -110,10 +110,15 @@ log "deploying the demo app and its FlagGuards"
 sed "s/__ENVIRONMENT_KEY__/$FLAGSMITH_ENVIRONMENT_KEY/g" "$DEMO_SRC/checkout.yaml" >"$DEMO_DIR/checkout.yaml"
 "$KUBECTL" apply -f "$(native_path "$DEMO_DIR/checkout.yaml")"
 "$KUBECTL" rollout status deployment/checkout -n shop --timeout 3m
-for _ in $(seq 1 60); do
-  [[ "$("$KUBECTL" get flagguards -n shop -o name 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]] && break
+# Wait until both guards exist (one comes from the Deployment's annotation)
+# and Flagbreaker has checked each once.
+for _ in $(seq 1 90); do
+  ready="$("$KUBECTL" get flagguards -n shop -o json 2>/dev/null |
+    jq '[.items[] | select((.status.phase // "") != "")] | length' 2>/dev/null || echo 0)"
+  [[ "$ready" -ge 2 ]] && break
   sleep 1
 done
+[[ "${ready:-0}" -ge 2 ]] || die "the FlagGuards in namespace shop were not checked within 90s; see: KUBECONFIG=.demo/kubeconfig bin/kubectl logs -n flagbreaker-system deployment/flagbreaker"
 "$KUBECTL" get flagguards -n shop
 cat <<EOF
 

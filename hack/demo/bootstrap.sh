@@ -161,7 +161,9 @@ ensure_segment_override() {
 # ensure_org_api_key ORG_ID NAME -> key (only readable when created)
 ensure_org_api_key() {
   local saved="$DEMO_DIR/org-api-key"
-  if [[ -s "$saved" ]]; then
+  # A key saved for an earlier Flagsmith (the cluster was recreated without
+  # down.sh) no longer works: make a new one.
+  if [[ -s "$saved" ]] && curl -fsS -o /dev/null -H "Authorization: Api-Key $(cat "$saved")" "$API_URL/api/v1/organisations/" 2>/dev/null; then
     cat "$saved"
     return
   fi
@@ -169,13 +171,17 @@ ensure_org_api_key() {
     "$(jq -n --arg n "$2" '{name: $n, is_admin: true}')" | jq -r .key | tee "$saved"
 }
 
+# need NAME VALUE: stops here if a step returned nothing. A failure inside
+# $(...) doesn't stop the script by itself.
+need() { [[ -n "$2" && "$2" != null ]] || die "bootstrap: no $1 from the Flagsmith API (see the error above)"; }
+
 wait_for_api
 login
 
 log "creating org Acme, project Checkout, environment Production"
-ORG_ID="$(ensure_org "Acme")"
-PROJECT_ID="$(ensure_project "$ORG_ID" "Checkout")"
-ENVIRONMENT_KEY="$(ensure_environment "$PROJECT_ID" "Production")"
+ORG_ID="$(ensure_org "Acme")" && need "organisation ID" "$ORG_ID"
+PROJECT_ID="$(ensure_project "$ORG_ID" "Checkout")" && need "project ID" "$PROJECT_ID"
+ENVIRONMENT_KEY="$(ensure_environment "$PROJECT_ID" "Production")" && need "environment key" "$ENVIRONMENT_KEY"
 
 log "creating flags"
 NEW_PRICING_ID="$(ensure_feature "$PROJECT_ID" new_pricing false "" \
@@ -188,17 +194,21 @@ MODE_ID="$(ensure_feature "$PROJECT_ID" flagbreaker_mode true "act" \
   "watch: only report to Feature Health. act: also switch broken flags off.")"
 POLICY_ID="$(ensure_feature "$PROJECT_ID" flagbreaker_policy true "{}" \
   'A mode per flag, as JSON: {"new_pricing": {"mode": "watch"}}. Modes: watch, act, off. The most cautious setting wins.')"
+need "new_pricing ID" "$NEW_PRICING_ID"
+need "express_checkout ID" "$EXPRESS_CHECKOUT_ID"
+need "flagbreaker_mode ID" "$MODE_ID"
+need "flagbreaker_policy ID" "$POLICY_ID"
 
 # Beta testers already get new_pricing, through a segment override. A
 # complete switch-off has to turn that off too, and a restore back on.
 log "giving the beta_testers segment new_pricing"
-BETA_SEGMENT_ID="$(ensure_segment "$PROJECT_ID" beta_testers plan beta)"
+BETA_SEGMENT_ID="$(ensure_segment "$PROJECT_ID" beta_testers plan beta)" && need "segment ID" "$BETA_SEGMENT_ID"
 ensure_segment_override "$ENVIRONMENT_KEY" "$NEW_PRICING_ID" "$BETA_SEGMENT_ID"
 
 log "adding Feature Health providers: Webhook (Flagbreaker) and Grafana (alerts)"
-HEALTH_WEBHOOK_PATH="$(ensure_health_provider "$PROJECT_ID" Webhook)"
-GRAFANA_WEBHOOK_PATH="$(ensure_health_provider "$PROJECT_ID" Grafana)"
-ORG_API_KEY="$(ensure_org_api_key "$ORG_ID" "flagbreaker")"
+HEALTH_WEBHOOK_PATH="$(ensure_health_provider "$PROJECT_ID" Webhook)" && need "Webhook provider path" "$HEALTH_WEBHOOK_PATH"
+GRAFANA_WEBHOOK_PATH="$(ensure_health_provider "$PROJECT_ID" Grafana)" && need "Grafana provider path" "$GRAFANA_WEBHOOK_PATH"
+ORG_API_KEY="$(ensure_org_api_key "$ORG_ID" "flagbreaker")" && need "organisation API key" "$ORG_API_KEY"
 
 # FLAG_UPDATED webhooks tell Flagbreaker exactly when a flag changed and who
 # changed it. Flagsmith signs each one with this secret (HMAC-SHA256).

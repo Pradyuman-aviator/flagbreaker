@@ -17,10 +17,7 @@ ALERT="$ROOT_DIR/hack/demo/alert.sh"
 
 log "1. the annotation on deployment/checkout made FlagGuard $G"
 wait_for $G 60 '.metadata.labels["flagbreaker.dev/generated"] == "true" and (.status.phase // "") != ""'
-case "$(phase $G)" in
-  Armed | Recovered) ;;
-  *) die "FlagGuard $G should be Armed or Recovered before the test, is $(phase $G)" ;;
-esac
+require_settled_guard $G
 bash "$ALERT" resolve >/dev/null # clear any alert left from an earlier run
 
 log "2. switching express_checkout on, as $FLAGSMITH_ADMIN_EMAIL; the pods stay healthy"

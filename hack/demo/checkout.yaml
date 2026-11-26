@@ -4,6 +4,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: shop
+  annotations:
+    # Set by a cluster admin: FlagGuards in this namespace may act on the
+    # Production environment, and on no other.
+    flagbreaker.dev/allowed-environments: "__ENVIRONMENT_KEY__"
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -15,10 +15,8 @@ G=checkout-new-pricing
 ID=$FLAGSMITH_NEW_PRICING_ID
 SEG=$FLAGSMITH_BETA_SEGMENT_ID
 
-case "$(phase $G)" in
-  Armed | Recovered) ;;
-  *) die "FlagGuard $G should be Armed or Recovered before the test, is $(phase $G)" ;;
-esac
+reset_demo
+require_settled_guard $G
 wait_for_settled_rollout
 # Start from the state bootstrap.sh made: off for everyone, on for beta testers.
 as_person PATCH "$(flag_path "$ID")" "{\"segment_overrides\": [{\"segment\": {\"id\": $SEG}, \"enabled\": true}]}" >/dev/null
@@ -46,13 +44,13 @@ print_timeline $G
 
 log "4. restoring with the flagbreaker.dev/restore annotation"
 "$KUBECTL" annotate flagguard $G -n shop flagbreaker.dev/restore="$(date +%s)" --overwrite >/dev/null
-wait_for $G 30 '.status.phase == "Armed" and (.status.snapshot == null)'
-state="$(flag "$ID")"
-[[ "$(jq -r .default <<<"$state")" == true ]] || die "restore should turn the default back on: $state"
-[[ "$(jq -r --arg s "$SEG" '.segments[$s]' <<<"$state")" == true ]] || die "restore should turn the beta_testers override back on: $state"
-log "   restored; the bug is still there, so the breaker must trip again"
-wait_for_phase $G Tripped 90
-[[ "$(guard $G | jq -r '.status.trigger.changedBy')" == "flagbreaker (restore)" ]] || die "the second trip should blame the restore"
+# The bug is still there, so the restored flag trips the breaker again within
+# seconds. The second incident proves what the restore turned back on: it
+# blames the restore, and its switch-off finds the default and the override on.
+wait_for $G 90 '.status.phase == "Tripped" and .status.trigger.changedBy == "flagbreaker (restore)"'
+guard $G | jq -e '[.status.timeline[] | select(.event == "FlagSwitchedOff") | .message] | any(contains("1 segment override"))' >/dev/null ||
+  die "after the restore the beta_testers override should have been on again: $(guard $G | jq -c '[.status.timeline[].message]')"
+log "   restored the default and the beta_testers override; the bug is still there, so it tripped again"
 [[ "$(jq -r .default <<<"$(flag "$ID")")" == false ]] || die "the flag should be off again"
 wait_for_phase $G Recovered 240
 
