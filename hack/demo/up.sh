@@ -114,7 +114,11 @@ log "installing Flagbreaker from charts/flagbreaker"
 "$KUBECTL" rollout status deployment/flagbreaker -n flagbreaker-system --timeout 2m
 
 log "deploying the demo app and its FlagGuards"
-sed "s/__ENVIRONMENT_KEY__/$FLAGSMITH_ENVIRONMENT_KEY/g" "$DEMO_SRC/checkout.yaml" >"$DEMO_DIR/checkout.yaml"
+# The app's tag is always dev, so the pods get the image's ID too: when a
+# re-run rebuilt the app, the changed ID rolls them onto the new image.
+app_image="$(docker image inspect -f '{{.Id}}' checkout-demo:dev)"
+sed -e "s/__ENVIRONMENT_KEY__/$FLAGSMITH_ENVIRONMENT_KEY/g" -e "s/__APP_IMAGE_ID__/$app_image/g" \
+  "$DEMO_SRC/checkout.yaml" >"$DEMO_DIR/checkout.yaml"
 "$KUBECTL" apply -f "$(native_path "$DEMO_DIR/checkout.yaml")"
 "$KUBECTL" rollout status deployment/checkout -n shop --timeout 3m
 "$KUBECTL" rollout status deployment/shopper -n shop --timeout 3m

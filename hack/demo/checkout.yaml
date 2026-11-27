@@ -1,5 +1,6 @@
 # The demo workload and how it is guarded. hack/demo/up.sh fills in
-# __ENVIRONMENT_KEY__ (the Production environment's client-side key).
+# __ENVIRONMENT_KEY__ (the Production environment's client-side key) and
+# __APP_IMAGE_ID__ (the ID of the checkout-demo:dev image it built).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -28,6 +29,9 @@ spec:
   template:
     metadata:
       labels: {app: checkout}
+      annotations:
+        # Rolls the pods when up.sh rebuilt the app: the tag stays dev.
+        demo.flagbreaker.dev/image-id: "__APP_IMAGE_ID__"
     spec:
       containers:
         - name: checkout
@@ -93,6 +97,8 @@ spec:
   template:
     metadata:
       labels: {app: shopper}
+      annotations:
+        demo.flagbreaker.dev/image-id: "__APP_IMAGE_ID__"
     spec:
       containers:
         - name: shopper
