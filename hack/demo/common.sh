@@ -31,10 +31,13 @@ GOOD_CONFIG='{"tax_rate": 0.08}'
 # shellcheck disable=SC2034 # used by the scripts that source this file
 BAD_CONFIG='{"tax_rate": "8%"}'
 
-# reset_demo: new_pricing off, checkout_config good and the checkout app up,
-# whatever an earlier (perhaps failed) run left behind.
+# reset_demo: new_pricing and new_payments off, checkout_config good and the
+# checkout app up, whatever an earlier (perhaps failed) run left behind.
 reset_demo() {
   switch "$FLAGSMITH_NEW_PRICING_ID" off
+  if [[ -n "${FLAGSMITH_NEW_PAYMENTS_ID:-}" ]]; then
+    switch "$FLAGSMITH_NEW_PAYMENTS_ID" off
+  fi
   [[ -n "${FLAGSMITH_CONFIG_ID:-}" ]] && set_value "$FLAGSMITH_CONFIG_ID" "$GOOD_CONFIG"
   if ! "$KUBECTL" wait --for=condition=Available deployment/checkout -n shop --timeout=10s >/dev/null 2>&1; then
     log "the checkout app is down from an earlier run; restarting its pods"
@@ -142,6 +145,26 @@ wait_for_settled_rollout() {
     ((i == 0)) && log "waiting $((35 - age))s for the last rollout to settle (Flagbreaker won't blame a flag for a fresh deploy)"
     sleep 1
   done
+}
+
+# wait_for_crash_free_minute: Flagbreaker doesn't blame a flag for a
+# breakage that came first, and a checkout pod that crashed in the minute
+# before a change counts as one. Kubernetes keeps a container's last crash,
+# so a test that follows another test's crashes, such as one on a pod that
+# Flagbreaker didn't restart, waits until the newest is 65s old.
+wait_for_crash_free_minute() {
+  local newest age i
+  for ((i = 0; i < 120; i++)); do
+    newest="$("$KUBECTL" get pods -n shop -l app=checkout -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)
+      | .status.containerStatuses[]? | (.state.terminated, .lastState.terminated)
+      | select(. != null and (.exitCode != 0 or .reason == "OOMKilled")) | .finishedAt] | max // empty')"
+    [[ -n "$newest" ]] || return 0
+    age=$(($(date -u +%s) - $(epoch_of "$newest")))
+    ((age >= 65)) && return 0
+    ((i == 0)) && log "waiting $((65 - age))s for the checkout pods' last crash to be a minute old (Flagbreaker doesn't blame a flag for a breakage that came first)"
+    sleep 1
+  done
+  die "a checkout pod kept crashing: $("$KUBECTL" get pods -n shop -l app=checkout 2>&1)"
 }
 
 print_timeline() {

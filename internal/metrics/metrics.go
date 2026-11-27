@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	// Trips counts trips by guard, flag, environment, mode and cause (pods or
-	// alert).
+	// Trips counts trips by guard, flag, environment, mode and cause (pods,
+	// requests or alert).
 	Trips = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "flagbreaker_trips_total",
 		Help: "Times a FlagGuard tripped.",

@@ -11,7 +11,7 @@ type Mode string
 const (
 	// ModeWatch only reports breakages to Flagsmith Feature Health.
 	ModeWatch Mode = "watch"
-	// ModeAct also switches the flag off.
+	// ModeAct also switches the flag off, or puts a bad value back.
 	ModeAct Mode = "act"
 )
 
@@ -23,8 +23,9 @@ const (
 	PhaseArmed Phase = "Armed"
 	// PhaseTripped means the workload broke after the flag changed.
 	PhaseTripped Phase = "Tripped"
-	// PhaseRecovered means the flag is off and the workload was verified
-	// healthy. The guard waits for a person to turn the flag back on.
+	// PhaseRecovered means the workload was verified healthy after an
+	// incident. After a switch-off, the guard waits for a person to turn the
+	// flag back on; after a bad value was put back, it re-arms at once.
 	PhaseRecovered Phase = "Recovered"
 )
 
@@ -45,10 +46,10 @@ type FlagGuardSpec struct {
 	Workload WorkloadReference `json:"workload"`
 
 	// Mode is this guard's say in the mode: watch reports to Feature Health
-	// only; act also switches the flag off. Flagbreaker also asks
-	// flagbreaker_policy and flagbreaker_mode in Flagsmith, and the most
-	// cautious answer wins: it acts only when something says act and nothing
-	// says watch.
+	// only; act also switches the flag off, or puts a bad value back.
+	// Flagbreaker also asks flagbreaker_policy and flagbreaker_mode in
+	// Flagsmith, and the most cautious answer wins: it acts only when
+	// something says act and nothing says watch.
 	// +optional
 	Mode Mode `json:"mode,omitempty"`
 
@@ -91,6 +92,62 @@ type FlagGuardSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=5
 	Links []Link `json:"links,omitempty"`
+
+	// Requests also reads the workload's own request counter, in the
+	// Prometheus text format, from each of its pods, and trips the breaker
+	// when too many requests fail with 5xx after a flag change, even if no
+	// pod crashes. Leave it out to watch the pods only.
+	// +optional
+	Requests *RequestsSpec `json:"requests,omitempty"`
+}
+
+// RequestsSpec says where a workload counts its requests. Flagbreaker reads
+// http://<pod IP>:<port><path> on each running pod of the workload, sums the
+// metric's series, and counts the series whose statusLabel starts with 5 as
+// failed. 4xx counts as handled, not failed.
+type RequestsSpec struct {
+	// Port is the port each pod serves its metrics on.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+
+	// Path is the HTTP path of the metrics.
+	// +kubebuilder:default="/metrics"
+	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:MaxLength=200
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Metric is the request counter: a counter, or a histogram's or
+	// summary's _count, or its base name.
+	// +kubebuilder:default="http_requests_total"
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_:][a-zA-Z0-9_:]*$`
+	// +optional
+	Metric string `json:"metric,omitempty"`
+
+	// StatusLabel is the label that holds each request's HTTP status code.
+	// +kubebuilder:default="code"
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_]*$`
+	// +optional
+	StatusLabel string `json:"statusLabel,omitempty"`
+
+	// MaxErrorPercent: more failed requests than this percentage is
+	// failing. flagbreaker_policy in Flagsmith can set it per flag, with
+	// decimals.
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MaxErrorPercent int32 `json:"maxErrorPercent,omitempty"`
+
+	// MinRequests is how many requests must arrive, in the minute before a
+	// flag change and in the time after it, before failing requests are
+	// blamed on the change. Recovery from an incident that failing requests
+	// caused needs as many to succeed.
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinRequests int32 `json:"minRequests,omitempty"`
 }
 
 // Link is a titled URL.
@@ -211,6 +268,22 @@ type HealthAlert struct {
 	At metav1.Time `json:"at"`
 }
 
+// RequestsStatus is what the workload's pods counted in the minute up to At.
+type RequestsStatus struct {
+	// At is when the pods were last read.
+	At metav1.Time `json:"at"`
+	// PodsRead is how many pods answered.
+	PodsRead int32 `json:"podsRead"`
+	// Total is how many requests the pods counted in the minute up to At.
+	Total int64 `json:"total"`
+	// Failed is how many of them failed with 5xx.
+	Failed int64 `json:"failed"`
+	// ErrorRate is Failed as a percentage of Total, such as 4.2%. It is
+	// empty when no requests were counted.
+	// +optional
+	ErrorRate string `json:"errorRate,omitempty"`
+}
+
 // TimelineEntry is one step of an incident.
 type TimelineEntry struct {
 	Time metav1.Time `json:"time"`
@@ -275,6 +348,26 @@ type FlagGuardStatus struct {
 	// current incident, when an alert rather than the pods tripped it.
 	// +optional
 	Alert *HealthAlert `json:"alert,omitempty"`
+
+	// RequestsIncident is true when failing requests, not pods or an alert,
+	// tripped the current incident.
+	// +optional
+	RequestsIncident bool `json:"requestsIncident,omitempty"`
+
+	// RequestsFineBefore is true when, in the minute before the change that
+	// caused the current incident, at least minRequests requests arrived and
+	// no more than maxErrorPercent of them failed. Failing requests hold the
+	// recovery from an incident the pods caused only then: if as many failed
+	// before, that is the workload's normal, and with too few to tell, it
+	// may be. They always hold the recovery from an alert or from failing
+	// requests.
+	// +optional
+	RequestsFineBefore bool `json:"requestsFineBefore,omitempty"`
+
+	// Requests is what the workload's pods counted in the last minute, for a
+	// guard with spec.requests.
+	// +optional
+	Requests *RequestsStatus `json:"requests,omitempty"`
 
 	// HandledEventID is the newest Feature Health event from another
 	// provider that Flagbreaker has acted on. Older events never trip it
@@ -342,7 +435,8 @@ type FlagGuardStatus struct {
 
 // FlagGuard ties a Flagsmith flag to the workload that depends on it. When the
 // workload breaks right after the flag changes, Flagbreaker reports it to
-// Flagsmith Feature Health and, in act mode, switches the flag off.
+// Flagsmith Feature Health and, in act mode, switches the flag off or puts its
+// previous value back.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -354,6 +448,7 @@ type FlagGuardStatus struct {
 // +kubebuilder:printcolumn:name="Workload",type=string,JSONPath=`.spec.workload.name`
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Errors",type=string,JSONPath=`.status.requests.errorRate`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type FlagGuard struct {
 	metav1.TypeMeta   `json:",inline"`

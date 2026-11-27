@@ -1,8 +1,9 @@
 # Flagbreaker
 
 **A circuit breaker for Flagsmith flags on Kubernetes.** When a workload breaks
-right after a flag is switched on, or given a new remote config value,
-Flagbreaker:
+right after a flag is switched on, or given a new remote config value (its
+pods crash or stop being ready, or, with request checking on, its requests
+start failing while every pod stays up), Flagbreaker:
 - reports it to [Flagsmith Feature Health](https://docs.flagsmith.com/advanced-use/feature-health);
 - in act mode, switches the flag off, or for a bad value, puts the previous
   value back;
@@ -46,23 +47,25 @@ bash hack/demo/up.sh        # kind + self-hosted Flagsmith + Flagbreaker + a dem
 bash hack/demo/watch.sh     # in a second terminal: a live view of flags, pods, guards and Feature Health
 bash hack/demo/break.sh     # switch new_pricing on, the way a person would
 bash hack/demo/break.sh checkout_config   # or give checkout_config a value the shop can't parse
+bash hack/demo/break.sh new_payments   # payments fail; every pod stays up
 bash hack/demo/down.sh      # delete it all
 ```
 
 Open three things side by side and watch one incident:
 - the Flagsmith dashboard, at http://localhost:8080;
 - the shop, at http://localhost:8090. It stops answering while the pods
-  crash and comes back on its own;
+  crash, shows "Payment failed" while `new_payments` is on, and comes back
+  on its own;
 - `watch.sh`, in a terminal.
 
 | Script | What it does |
 |---|---|
 | `hack/demo/up.sh` | Brings up everything. Safe to re-run. |
 | `hack/demo/watch.sh` | Live terminal view: what Flagsmith serves, the shop, the pods, each guard's phase and last step, and Feature Health. |
-| `hack/demo/break.sh [flag] [on\|off]` | Switches a flag the way a person would, with the admin's token, so Flagsmith records who did it. `break.sh checkout_config` sets a value the shop can't parse instead; `break.sh checkout_config good` puts the good one back. |
+| `hack/demo/break.sh [flag] [on\|off]` | Switches a flag the way a person would, with the admin's token, so Flagsmith records who did it. `break.sh new_payments` makes the shop's payments fail while its pods stay up. `break.sh checkout_config` sets a value the shop can't parse instead; `break.sh checkout_config good` puts the good one back. |
 | `hack/demo/alert.sh fire\|resolve` | Sends a Grafana / Alertmanager alert for `express_checkout` to Flagsmith. |
 | `hack/demo/restore.sh` | Asks Flagbreaker to put the flag back as it was. |
-| `hack/demo/e2e-all.sh` | Every scenario, checked end to end, in about 4 minutes: act mode with a restore, watch mode set from Flagsmith, a Grafana alert, and a bad remote config value put back. |
+| `hack/demo/e2e-all.sh` | Every scenario, checked end to end: act mode with a restore, watch mode set from Flagsmith, a Grafana alert, a bad remote config value put back, and failing requests while every pod stays up. <!-- Add the duration measured on the first green CI run with e2e-errors.sh. --> |
 | `hack/demo/down.sh` | Deletes the cluster and the local state. |
 
 `up.sh` builds the whole demo through Flagsmith's API, with no clicks in the
@@ -72,7 +75,10 @@ dashboard:
 - the flags (one of them, `checkout_config`, is remote config), a segment, two
   Feature Health providers and a signed webhook;
 - Flagbreaker, from the Helm chart in this repo;
-- `checkout`, a small Go app that reads its flags with the Flagsmith SDK.
+- `checkout`, a small Go app that reads its flags with the Flagsmith SDK and
+  counts its requests by status code on `/metrics`;
+- `shopper`, the same app checking out 5 times a second, so there are
+  requests that can fail.
 
 At the end it prints the dashboard URL and an admin login. If ports 8000, 8080
 or 8090 are taken, run `API_PORT=18000 UI_PORT=18080 APP_PORT=18090 bash hack/demo/up.sh`.
@@ -105,11 +111,11 @@ Flagbreaker has nothing to watch, nothing to switch and nowhere to report.
 |---|---|
 | Flags, through `/api/__future__/environments/{key}/features/{id}/` | Reads the flag. Switches off the environment default and every segment override that is on, in one versioned change; if Flagsmith refuses that, for example because of an experiment's override, one change per override. A restore turns them back on. |
 | Remote config (flag values) | Notices when the environment default gets a new value, such as a JSON config. If the workload breaks right after, puts the previous value back and leaves the flag on: the SDK's `GetFeatureValue` returns a value whether or not the flag is on, so switching it off wouldn't help. |
-| Feature Health, Webhook provider | Reports Unhealthy and Healthy with the incident timeline, the failing pods and runbook links, which show in the flag's Health tab and as the Unhealthy tag. |
+| Feature Health, Webhook provider | Reports Unhealthy and Healthy with the incident timeline, the failing pods, the failed-request counts and runbook links, which show in the flag's Health tab and as the Unhealthy tag. |
 | Feature Health events (the Grafana / Prometheus Alertmanager provider, or any other) | Trips on another provider's alert for the flag. Waits for the alert to clear before calling the workload recovered. Treats a person's **Dismiss** as an acknowledgement. |
 | Environment webhooks (`FLAG_UPDATED`, HMAC-SHA256 signed) | Learns exactly when a flag changed and who changed it. |
-| Remote config, read with the official Go SDK | Reads the breaker's own settings: `flagbreaker_enabled` (the brake), `flagbreaker_mode` (watch or act) and `flagbreaker_policy` (a mode per flag, as JSON). |
-| Change requests | Flagbreaker never gets around them. A 409 drops it to watch mode with a `BlockedByChangeRequests` condition. |
+| Remote config, read with the official Go SDK | Reads the breaker's own settings: `flagbreaker_enabled` (the brake), `flagbreaker_mode` (watch or act) and `flagbreaker_policy` (a mode per flag, and for guards that read requests a `maxErrorPercent`, as JSON). |
+| Change requests | Flagbreaker never gets around them. Change requests come with Flagsmith's workflows module, which the open-source build doesn't include, so the demo can't show them. When an environment requires approvals, the `__future__` endpoint answers 409, and Flagbreaker drops to watch mode with a `BlockedByChangeRequests` condition. |
 | Self-hosting | The demo runs Flagsmith from its official Helm chart and sets it up through the API. It also turns on the dashboard's own Feature Health screens, which stock self-hosted installs hide, by pointing the dashboard at a local Flagsmith-on-Flagsmith project. |
 
 ## Guard a workload
@@ -175,6 +181,97 @@ off pauses it everywhere.
 Either way the flag is watched again, and a second breakage trips the breaker
 again. The [runbook](docs/runbook.md) covers each step.
 
+## Catch failing requests, not just crashes
+
+Kubernetes only knows whether a pod is alive. A bad flag often keeps every
+pod alive and makes requests fail instead: the checkout page says "Payment
+failed" while `/healthz` still says ok. Most web apps already count their
+requests by status code. Give a FlagGuard `spec.requests`, and Flagbreaker
+reads that counter straight from each of the workload's pods, as Prometheus
+would scrape it, with no Prometheus server:
+
+```yaml
+spec:
+  flag: new_payments
+  environmentKey: "<client-side environment key>"
+  workload: {kind: Deployment, name: checkout}
+  requests:
+    port: 8080                    # each pod's metrics port
+    path: /metrics                # the default
+    metric: http_requests_total   # the default: a counter, or a histogram's or summary's _count
+    statusLabel: code             # the default: the label with the HTTP status
+    maxErrorPercent: 5            # the default: more failed requests than this is failing
+    minRequests: 20               # the default: fewer requests are too few to judge
+```
+
+For a guard made from annotations, one more annotation does it, with
+`flagbreaker.dev/requests-path`, `requests-metric` and
+`requests-status-label` for the rest:
+
+```sh
+kubectl annotate deployment checkout -n shop flagbreaker.dev/requests-port=8080
+```
+
+- **What counts as failed.** Every series of the metric counts toward the
+  total; a series whose status label starts with 5 counts as failed. 4xx
+  counts as handled, not failed.
+- **The rule.** After a switch-on or a new value, once at least
+  `minRequests` requests arrived and more than `maxErrorPercent` of them
+  failed, the change is blamed, even with every pod up and ready. That holds
+  only if the minute before the change was fine: at least `minRequests`
+  requests, with no more than `maxErrorPercent` failing. That minute never
+  reaches back past the last verified recovery, so a restore just after an
+  incident is compared with the requests since, not with the incident's.
+- **The rest is as for pods.** The same `window`, rollout and
+  already-failing rules apply. Act mode switches the flag off, or puts the
+  previous value back; it restarts nothing, since nothing crashed. Feature
+  Health gets the counts.
+- **Recovery is checked on the requests too.** Requests failing in the last
+  minute mean the workload isn't healthy yet, after an incident an alert or
+  failing requests caused. After one the pods caused, they count only if the
+  minute before the change was fine, as the rule needs: if more than the
+  limit failed then, that is normal for that workload, and with fewer than
+  `minRequests` requests, nothing shows it isn't. After an incident failing
+  requests caused, at least `minRequests` requests must go through over
+  `stableFor`, with no more than the limit failing; without traffic, the
+  guard stays tripped.
+- **Tune the limit from Flagsmith.** `{"new_payments": {"mode": "act",
+  "maxErrorPercent": 2}}` in `flagbreaker_policy` replaces the guard's limit
+  for that flag, decimals allowed. It never turns request reading on by
+  itself.
+- **NetworkPolicies.** Flagbreaker reads each pod's metrics port from its own
+  pod. Where NetworkPolicies deny ingress by default, allow it:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-flagbreaker-metrics
+    namespace: shop
+  spec:
+    podSelector:
+      matchLabels: {app: checkout}
+    policyTypes: [Ingress]
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: flagbreaker-system}
+            podSelector:
+              matchLabels: {app.kubernetes.io/name: flagbreaker}
+        ports:
+          - {port: 8080, protocol: TCP}
+  ```
+
+In the demo, `bash hack/demo/break.sh new_payments` switches on a payment
+provider that fails every payment. The incident timeline says how many
+requests failed, against how many in the minute before, and that every pod
+stayed ready; the recovery entry says how many went through. If another
+scenario just crashed the shop's pods, give it a minute first: a crash in
+the minute before the switch-on means the shop was already failing, so the
+flag isn't blamed.
+
+<!-- Paste here the timeline that hack/demo/e2e-errors.sh prints ("passed. Timeline:") in the first green CI run, as a code block like the new_pricing one above. Copy it; don't type numbers. -->
+
 ## Install in your cluster
 
 Each release publishes the chart and a multi-arch image (amd64 and arm64) to
@@ -227,10 +324,14 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
 - **Real:**
   - Flagsmith 2.295.2, with its API, webhooks, Feature Health and dashboard;
   - the Kubernetes cluster and the pods crashing;
-  - the switch-off, the pod restarts and the recovery check.
+  - the switch-off, the pod restarts and the recovery check;
+  - the shop's request counter, Flagbreaker reading it from each pod, and the
+    requests that fail.
 - **Staged:**
   - The demo app's bugs: `checkout` exits while `new_pricing` is on, and when
-    `checkout_config` holds a value it can't parse.
+    `checkout_config` holds a value it can't parse, and its payments fail
+    while `new_payments` is on.
+  - The shoppers: a loop that checks out 5 times a second.
   - The Grafana alert, which `hack/demo/alert.sh` posts to Flagsmith's
     Grafana provider in the format Alertmanager uses. There's no Prometheus
     in the demo.
@@ -243,7 +344,9 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
     onward, Flagbreaker doesn't blame the flag; it only reports.
 - **An Alertmanager rule** can already mark a flag Unhealthy through
   Flagsmith's Grafana provider, but nothing in open-source Flagsmith then
-  switches the flag off. Flagbreaker acts on those alerts too.
+  switches the flag off. Flagbreaker acts on those alerts too. For failing
+  requests, it needs neither a Prometheus server nor a rule per flag: it
+  reads the app's own counter, and it knows which flag changed.
 - **Flagsmith's Release Pipelines** can abort on an unhealthy flag, but they
   are a closed beta. Flagbreaker is open source and guards any flag at any
   time, and it checks recovery on the workload itself, because an API call
@@ -254,8 +357,8 @@ helm install flagbreaker ./charts/flagbreaker -n flagbreaker-system --create-nam
 ```mermaid
 stateDiagram-v2
   [*] --> Armed
-  Armed --> Tripped: pods fail after a switch-on or a new value, or another provider's alert fires
-  Tripped --> Recovered: pods healthy for stableFor and no alert firing
+  Armed --> Tripped: pods fail or requests fail after a switch-on or a new value, or another provider's alert fires
+  Tripped --> Recovered: pods healthy and requests not failing for stableFor, and no alert firing
   Tripped --> Armed: a person re-enables the flag or dismisses the incident
   Recovered --> Armed: the flag is on again, it gets a new value, or at once after an incident a new value alone caused
 ```
@@ -267,9 +370,10 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 116 Go tests cover the rules, the client, webhook verification,
-  and whole incidents run through `Reconcile` against a fake Flagsmith,
-  including one per bug that two independent code reviews found. On every
+- **Tests.** 172 Go tests cover the rules, the client, webhook verification,
+  reading request counters, and whole incidents run through `Reconcile`
+  against a fake Flagsmith, including one per bug that two independent code
+  reviews found. On every
   push to main and every pull request, CI runs them, plus an end-to-end job
   that brings up the demo on a fresh kind cluster and runs every scenario.
 - **Where it has run.**
@@ -296,6 +400,34 @@ stateDiagram-v2
 - **Unlicensed self-hosted Flagsmith allows one project and one seat per
   organisation.** So the demo uses an organisation API key, not a
   least-privilege user.
+- **Request checking needs a counter Flagbreaker can reach.** The workload
+  must serve a Prometheus text-format counter on a port of each pod that the
+  controller can reach: no TLS, no auth, no protobuf, no named ports.
+- **The request history lives in memory.** A change seen before a
+  controller restart isn't blamed for failing requests; the pods rule still
+  applies to it. After a restart, the minute before a change holds only what
+  the pods counted since.
+- **It takes traffic.** `minRequests` requests are needed in the minute
+  before a change and in the time after it, or failing requests aren't
+  blamed. With fewer before it, they don't hold the recovery when the pods
+  trip on that change either.
+- **The limit must be above the workload's usual error rate.** Where more
+  than `maxErrorPercent` of the requests fail anyway, no change is blamed for
+  failing requests, and they don't hold the recovery when the pods trip. An
+  incident an alert caused doesn't recover while they fail; dismiss it in
+  Flagsmith.
+- **Pods are read during the check, and the controller checks one guard at
+  a time.** Pods that don't answer on the metrics port, for example behind a
+  NetworkPolicy that drops the traffic, delay every guard's checks by up to
+  3 s each time they are read, at most every 4 s per guard. `RequestsRead`
+  says why; allow the port, or remove `spec.requests` from that guard until
+  they answer.
+- **Only 5xx counts.** A wrong page served with 200, or a change that stops
+  requests from arriving at all, isn't seen.
+- **An outage elsewhere can be blamed.** If a downstream service starts
+  failing within the window of a change, the change gets the blame. Watch
+  mode, the minute-before check and Dismiss limit the damage.
+- **Segment-only rollouts are still untracked,** as above, for requests too.
 
 ## Tried it?
 

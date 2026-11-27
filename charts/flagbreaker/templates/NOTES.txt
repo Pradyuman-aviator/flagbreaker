@@ -18,12 +18,15 @@ Flagbreaker is running in {{ .Release.Namespace }}.
 3. Flagbreaker {{ if .Values.flagsmith.settingsEnvironmentKey }}reads flagbreaker_enabled, flagbreaker_mode and flagbreaker_policy from Flagsmith{{ else }}has no settings environment, so a guard acts only if its spec.mode is act{{ end }}.
    It watches (reports only) unless something says act and nothing says watch.
 
+4. Guards with spec.requests read each pod's metrics port from the flagbreaker
+   pod; with default-deny NetworkPolicies, allow that ingress.
+
 Uninstalling: delete the FlagGuards first, while Flagbreaker still runs; it
 clears their Feature Health and removes its finalizer from each. Guards left
 behind after Flagbreaker is gone keep that finalizer until it is removed with
 `kubectl patch flagguard <name> -n <namespace> --type=merge -p '{"metadata":{"finalizers":null}}'`.
 
-Upgrading: Helm installs CRDs only once. Before `helm upgrade`, apply the CRD
-from the same version of the repository:
+Upgrading: Helm installs CRDs only once and never upgrades them. Before
+`helm upgrade`, apply the CRD of the version you upgrade to. For this one:
 
-     kubectl apply --server-side -f charts/flagbreaker/crds/
+     kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/Pradyuman-aviator/flagbreaker/v{{ .Chart.AppVersion }}/charts/flagbreaker/crds/flagbreaker.dev_flagguards.yaml

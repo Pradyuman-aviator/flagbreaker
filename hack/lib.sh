@@ -1,8 +1,8 @@
 # shellcheck shell=bash disable=SC2034 # the scripts that source this use the settings
 # Shared settings for the hack/ scripts. Source this file; don't run it.
 #
-# Every tool version is pinned here, so `make demo` behaves the same on every
-# machine. The scripts download their own kind, kubectl and helm into ./bin and
+# Every tool version is pinned here, so `bash hack/demo/up.sh` behaves the
+# same on every machine. The scripts download their own kind, kubectl and helm into ./bin and
 # never touch your ~/.kube/config: the demo cluster gets its own kubeconfig in
 # ./.demo.
 

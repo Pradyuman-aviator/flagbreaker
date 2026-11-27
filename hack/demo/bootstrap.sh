@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Sets up a fresh self-hosted Flagsmith through its REST API, so `make demo`
-# needs no clicks in the dashboard. Safe to re-run: every step finds what it
-# created last time before creating anything.
+# Sets up a fresh self-hosted Flagsmith through its REST API, so
+# `bash hack/demo/up.sh` needs no clicks in the dashboard. Safe to re-run:
+# every step finds what it created last time before creating anything.
 #
 # What it creates:
 #   - the first admin user (signed up through the API) and an org API key
 #   - org "Acme", project "Checkout", environment "Production"
-#   - flags: new_pricing, express_checkout and checkout_config (the demo
-#     flags; checkout_config is remote config) plus the breaker's own
-#     settings, flagbreaker_enabled, flagbreaker_mode and flagbreaker_policy
+#   - flags: new_pricing, express_checkout, checkout_config and new_payments
+#     (the demo flags; checkout_config is remote config) plus the breaker's
+#     own settings, flagbreaker_enabled, flagbreaker_mode and
+#     flagbreaker_policy (a mode and a maxErrorPercent per flag)
 #   - segment beta_testers, with new_pricing switched on for it
 #   - Feature Health "Webhook" (Flagbreaker's reports) and "Grafana" (alerts)
 #     providers for the Checkout project
@@ -204,15 +205,18 @@ EXPRESS_CHECKOUT_ID="$(ensure_feature "$PROJECT_ID" express_checkout false "" \
   "One-click checkout. The demo app runs fine with it; a (staged) Grafana alert says it raises the error rate.")"
 CONFIG_ID="$(ensure_feature "$PROJECT_ID" checkout_config true '{"tax_rate": 0.08}' \
   "Checkout settings as JSON (remote config). The demo app reads tax_rate and crashes on a value it can't parse.")"
+NEW_PAYMENTS_ID="$(ensure_feature "$PROJECT_ID" new_payments false "" \
+  "New payment provider. While it is on, the demo shop's payments fail with HTTP 500, but its pods stay up and ready.")"
 ensure_feature "$PROJECT_ID" flagbreaker_enabled true "" \
   "Master switch for Flagbreaker. Off means it watches nothing and changes nothing." >/dev/null
 MODE_ID="$(ensure_feature "$PROJECT_ID" flagbreaker_mode true "act" \
   "watch: only report to Feature Health. act: also switch broken flags off.")"
 POLICY_ID="$(ensure_feature "$PROJECT_ID" flagbreaker_policy true "{}" \
-  'A mode per flag, as JSON: {"new_pricing": {"mode": "watch"}}. Modes: watch, act, off. The most cautious setting wins.')"
+  'A mode per flag, as JSON: {"new_pricing": {"mode": "watch"}}. Modes: watch, act, off. The most cautious setting wins. For guards that read requests, maxErrorPercent sets how many may fail: {"new_payments": {"maxErrorPercent": 2}}.')"
 need "new_pricing ID" "$NEW_PRICING_ID"
 need "express_checkout ID" "$EXPRESS_CHECKOUT_ID"
 need "checkout_config ID" "$CONFIG_ID"
+need "new_payments ID" "$NEW_PAYMENTS_ID"
 need "flagbreaker_mode ID" "$MODE_ID"
 need "flagbreaker_policy ID" "$POLICY_ID"
 
@@ -264,6 +268,7 @@ FLAGSMITH_ENVIRONMENT_KEY=$ENVIRONMENT_KEY
 FLAGSMITH_NEW_PRICING_ID=$NEW_PRICING_ID
 FLAGSMITH_EXPRESS_CHECKOUT_ID=$EXPRESS_CHECKOUT_ID
 FLAGSMITH_CONFIG_ID=$CONFIG_ID
+FLAGSMITH_NEW_PAYMENTS_ID=$NEW_PAYMENTS_ID
 FLAGSMITH_MODE_ID=$MODE_ID
 FLAGSMITH_POLICY_ID=$POLICY_ID
 FLAGSMITH_BETA_SEGMENT_ID=$BETA_SEGMENT_ID

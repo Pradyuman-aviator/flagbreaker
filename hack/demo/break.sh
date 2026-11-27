@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Switches a flag on (new_pricing by default) in Production, the way a person
 # would: with the admin user's token, so Flagsmith records who made the
-# change. The demo app crashes while new_pricing is on, and Flagbreaker
-# should take it from there. For checkout_config, it sets a value instead.
+# change. The demo app crashes while new_pricing is on, and fails its
+# payments with HTTP 500 while new_payments is on, and Flagbreaker should
+# take it from there. For checkout_config, it sets a value instead.
 #
 #   hack/demo/break.sh                       # new_pricing on
+#   hack/demo/break.sh new_payments          # payments fail; every pod stays up
 #   hack/demo/break.sh express_checkout      # another flag on
 #   hack/demo/break.sh new_pricing off       # off again, by hand
 #   hack/demo/break.sh checkout_config       # a value the app can't parse
@@ -18,6 +20,10 @@ to=${2:-on}
 case "$name" in
   new_pricing) id=$FLAGSMITH_NEW_PRICING_ID ;;
   express_checkout) id=$FLAGSMITH_EXPRESS_CHECKOUT_ID ;;
+  new_payments)
+    id=${FLAGSMITH_NEW_PAYMENTS_ID:-}
+    [[ -n "$id" ]] || die "this demo predates new_payments; run hack/demo/up.sh again"
+    ;;
   checkout_config)
     id=${FLAGSMITH_CONFIG_ID:-}
     [[ -n "$id" ]] || die "this demo predates checkout_config; run hack/demo/up.sh again"

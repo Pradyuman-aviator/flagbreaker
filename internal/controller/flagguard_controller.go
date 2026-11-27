@@ -37,6 +37,7 @@ import (
 	"github.com/Pradyuman-aviator/flagbreaker/internal/changes"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/flagsmith"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/metrics"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/requests"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/settings"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/workload"
 )
@@ -53,6 +54,7 @@ const (
 	conditionPaused        = "Paused"
 	conditionSettings      = "SettingsValid"
 	conditionFeatureHealth = "FeatureHealthRead"
+	conditionRequests      = "RequestsRead"
 
 	maxTimeline   = 20
 	notReadyGrace = 20 * time.Second
@@ -91,6 +93,9 @@ type FlagGuardReconciler struct {
 	// RequireNamespaceOptIn makes a guard act only on environments its
 	// namespace's flagbreaker.dev/allowed-environments annotation lists.
 	RequireNamespaceOptIn bool
+	// Requests reads the request counters of guards with spec.requests.
+	// Optional: one with the default client is made on first use.
+	Requests *requests.Tracker
 
 	mu        sync.Mutex
 	lastCheck map[types.NamespacedName]time.Time
@@ -286,6 +291,8 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		return err
 	}
 	assessment := workload.Assess(pods, now, notReadyGrace)
+	// 2b. For a guard with spec.requests, read what the pods counted.
+	series, notBefore, readsRequests := r.readRequests(ctx, guard, spec, t, pods, now)
 
 	// 3. Notice flag changes made by people. A switch-off during an
 	// incident, or a new value during one a value caused, is what watch mode
@@ -368,6 +375,14 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		Alerts: alerts, AlertsSince: alertsSince(guard), HandledEventID: st.HandledEventID, Dismissed: dismissed,
 		Window: spec.Window.Duration, StableFor: spec.StableFor.Duration, FailingPods: int(spec.FailingPods),
 		FlagDisabledAt: timePtr(st.FlagDisabledAt), HealthySince: timePtr(st.HealthySince),
+		RequestsIncident: st.RequestsIncident, AlertIncident: st.Alert != nil, RequestsFineBefore: st.RequestsFineBefore,
+	}
+	if readsRequests {
+		in.Requests = &breaker.Requests{Series: series, NotBefore: notBefore,
+			MaxErrorPercent: float64(spec.Requests.MaxErrorPercent), MinRequests: float64(spec.Requests.MinRequests)}
+		if limit, ok := s.ErrorLimit(spec.Flag); ok {
+			in.Requests.MaxErrorPercent, in.Requests.LimitFrom = limit, settings.PolicyFlag
+		}
 	}
 	d := breaker.Decide(in)
 	st.HealthySince = metaTimePtr(d.HealthySince)
@@ -750,6 +765,12 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 	st.TrippedAt = metaNow(now)
 	st.FlagDisabledAt, st.FlagDisabledBy, st.RecoveredAt, st.HealthySince = nil, "", nil, nil
 	st.ReportedEventID = 0
+	// Recovery from an incident that failing requests caused waits for
+	// requests that succeed.
+	st.RequestsIncident = d.Cause == breaker.CauseRequests
+	// Failing requests hold the recovery from an incident the pods caused
+	// only if the requests were fine before the change.
+	st.RequestsFineBefore = d.RequestsFineBefore
 	// Alerts that are active now belong to this incident; none of them may
 	// trip the guard again once it is re-armed.
 	for _, al := range alerts {
@@ -1072,6 +1093,12 @@ func (r *FlagGuardReconciler) recover(ctx context.Context, guard *v1alpha1.FlagG
 	st := &guard.Status
 	st.Phase = v1alpha1.PhaseRecovered
 	st.RecoveredAt = metaNow(now)
+	if spec.Requests != nil && d.HealthySince != nil {
+		// The requests the pods counted up to here belong to the incident: a
+		// later change, such as a restore, is compared with the minute before
+		// it from here on, not with the incident's failures.
+		r.requestsTracker().Recovered(client.ObjectKeyFromObject(guard), *d.HealthySince)
+	}
 	addTimeline(st, now, "Recovered", strings.TrimSpace("Verified recovery: "+d.Why+". "+timings(st)))
 	if st.Snapshot != nil && (st.Snapshot.Enabled || pendingSegments(st) > 0) {
 		addTimeline(st, now, "RestoreAvailable", restoreHint(guard))
@@ -1133,7 +1160,7 @@ func (r *FlagGuardReconciler) rearm(ctx context.Context, guard *v1alpha1.FlagGua
 	}
 	// The trigger and the alert are cleared last: the Healthy report below
 	// still says what the incident was about.
-	defer func() { st.Trigger, st.Alert = nil, nil }()
+	defer func() { st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFineBefore = nil, nil, false, false }()
 	meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
 	addTimeline(st, now, "Rearmed", strings.ToUpper(d.Why[:1])+d.Why[1:])
 	// A person turned the environment default on by hand. Overrides that
@@ -1228,7 +1255,7 @@ func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1
 		st.FlagEnabled = &on
 		st.Phase = v1alpha1.PhaseArmed
 		st.TrippedAt, st.FlagDisabledAt, st.FlagDisabledBy, st.HealthySince, st.RecoveredAt = nil, nil, "", nil, nil
-		st.Trigger, st.Alert = nil, nil
+		st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFineBefore = nil, nil, false, false
 		meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
 		st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: true, ChangedBy: ChangedByRestore, WorkloadWasFailing: failing}
 	}
@@ -1433,6 +1460,7 @@ func (r *FlagGuardReconciler) forget(key types.NamespacedName) {
 	delete(r.lastCheck, key)
 	delete(r.pending, key)
 	r.mu.Unlock()
+	r.requestsTracker().Forget(key)
 	metrics.Forget(key.Namespace, key.Name)
 }
 

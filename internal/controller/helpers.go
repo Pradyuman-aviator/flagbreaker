@@ -42,8 +42,37 @@ func withDefaults(spec v1alpha1.FlagGuardSpec) v1alpha1.FlagGuardSpec {
 	if spec.Workload.Kind == "" {
 		spec.Workload.Kind = KindDeployment
 	}
+	if spec.Requests != nil {
+		// A copy: the guard's own spec stays as it was written.
+		rq := *spec.Requests
+		if rq.Path == "" {
+			rq.Path = defaultRequestsPath
+		}
+		if rq.Metric == "" {
+			rq.Metric = defaultRequestsMetric
+		}
+		if rq.StatusLabel == "" {
+			rq.StatusLabel = defaultStatusLabel
+		}
+		if rq.MaxErrorPercent < 1 {
+			rq.MaxErrorPercent = defaultMaxErrorPercent
+		}
+		if rq.MinRequests < 1 {
+			rq.MinRequests = defaultMinRequests
+		}
+		spec.Requests = &rq
+	}
 	return spec
 }
+
+// The API server's defaults for spec.requests.
+const (
+	defaultRequestsPath    = "/metrics"
+	defaultRequestsMetric  = "http_requests_total"
+	defaultStatusLabel     = "code"
+	defaultMaxErrorPercent = 5
+	defaultMinRequests     = 20
+)
 
 func setCondition(guard *v1alpha1.FlagGuard, kind string, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&guard.Status.Conditions, metav1.Condition{
@@ -194,14 +223,18 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 
 	value := st.Trigger != nil && st.Trigger.ValueChanged && !st.Trigger.IsSwitchOn()
 	both := st.Trigger != nil && st.Trigger.ValueChanged && st.Trigger.IsSwitchOn()
-	cause := "The workload broke after this flag changed"
+	broke := "The workload broke"
+	if st.RequestsIncident {
+		broke = "Requests to the workload started failing"
+	}
+	cause := broke + " after this flag changed"
 	switch {
 	case st.Alert != nil:
 		cause = fmt.Sprintf("%s reported %q for this flag", st.Alert.Provider, st.Alert.Title)
 	case value:
-		cause = "The workload broke after this flag's value changed"
+		cause = broke + " after this flag's value changed"
 	case both:
-		cause = "The workload broke after this flag was switched on and its value changed"
+		cause = broke + " after this flag was switched on and its value changed"
 	}
 	var summary string
 	switch {
@@ -252,6 +285,9 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 		if len(lines) > 0 {
 			event.Reason.TextBlocks = append(event.Reason.TextBlocks, flagsmith.TextBlock{Title: "Failing pods", Text: strings.Join(lines, "\n")})
 		}
+		if st.Requests != nil {
+			event.Reason.TextBlocks = append(event.Reason.TextBlocks, flagsmith.TextBlock{Title: "Requests", Text: requestsText(guard)})
+		}
 	}
 
 	var lines []string
@@ -263,6 +299,21 @@ func buildHealthEvent(guard *v1alpha1.FlagGuard, status flagsmith.HealthStatus, 
 	}
 	event.Reason.URLBlocks = links
 	return event
+}
+
+// requestsText says what the workload's pods counted in the last minute.
+func requestsText(guard *v1alpha1.FlagGuard) string {
+	rq := guard.Status.Requests
+	metric := defaultRequestsMetric
+	if s := guard.Spec.Requests; s != nil && s.Metric != "" {
+		metric = s.Metric
+	}
+	at := rq.At.UTC().Format(time.TimeOnly)
+	pods := fmt.Sprintf("%d pod%s", rq.PodsRead, plural(int(rq.PodsRead)))
+	if rq.Total == 0 {
+		return fmt.Sprintf("In the minute up to %s UTC, %s counted no requests on %s.", at, metric, pods)
+	}
+	return fmt.Sprintf("In the minute up to %s UTC, %d of %d requests failed (%s), counted by %s on %s.", at, rq.Failed, rq.Total, rq.ErrorRate, metric, pods)
 }
 
 func orA(by string) string {
