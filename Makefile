@@ -30,7 +30,7 @@ demo-alert: ## Fire a Grafana alert for express_checkout (resolve with: bash hac
 demo-restore: ## Restore new_pricing as it was before Flagbreaker switched it off
 	bash hack/demo/restore.sh
 
-demo-test: ## Run every end-to-end check: act, restore, watch mode and a Grafana alert
+demo-test: ## Run every end-to-end check: act, restore, watch mode, a Grafana alert, a bad value and failing requests
 	bash hack/demo/e2e-all.sh
 
 demo-down: ## Delete the demo cluster and its local state
