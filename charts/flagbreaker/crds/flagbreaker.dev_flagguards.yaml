@@ -39,6 +39,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.requests.errorRate
+      name: Errors
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -48,7 +51,8 @@ spec:
         description: |-
           FlagGuard ties a Flagsmith flag to the workload that depends on it. When the
           workload breaks right after the flag changes, Flagbreaker reports it to
-          Flagsmith Feature Health and, in act mode, switches the flag off.
+          Flagsmith Feature Health and, in act mode, switches the flag off or puts its
+          previous value back.
         properties:
           apiVersion:
             description: |-
@@ -120,14 +124,69 @@ spec:
               mode:
                 description: |-
                   Mode is this guard's say in the mode: watch reports to Feature Health
-                  only; act also switches the flag off. Flagbreaker also asks
-                  flagbreaker_policy and flagbreaker_mode in Flagsmith, and the most
-                  cautious answer wins: it acts only when something says act and nothing
-                  says watch.
+                  only; act also switches the flag off, or puts a bad value back.
+                  Flagbreaker also asks flagbreaker_policy and flagbreaker_mode in
+                  Flagsmith, and the most cautious answer wins: it acts only when
+                  something says act and nothing says watch.
                 enum:
                 - watch
                 - act
                 type: string
+              requests:
+                description: |-
+                  Requests also reads the workload's own request counter, in the
+                  Prometheus text format, from each of its pods, and trips the breaker
+                  when too many requests fail with 5xx after a flag change, even if no
+                  pod crashes. Leave it out to watch the pods only.
+                properties:
+                  maxErrorPercent:
+                    default: 5
+                    description: |-
+                      MaxErrorPercent: more failed requests than this percentage is
+                      failing. flagbreaker_policy in Flagsmith can set it per flag, with
+                      decimals.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  metric:
+                    default: http_requests_total
+                    description: |-
+                      Metric is the request counter: a counter, or a histogram's or
+                      summary's _count, or its base name.
+                    pattern: ^[a-zA-Z_:][a-zA-Z0-9_:]*$
+                    type: string
+                  minRequests:
+                    default: 20
+                    description: |-
+                      MinRequests is how many requests must arrive, in the minute before a
+                      flag change and in the time after it, before failing requests are
+                      blamed on the change. Recovery from an incident that failing requests
+                      caused needs as many to succeed.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  path:
+                    default: /metrics
+                    description: Path is the HTTP path of the metrics.
+                    maxLength: 200
+                    pattern: ^/
+                    type: string
+                  port:
+                    description: Port is the port each pod serves its metrics on.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  statusLabel:
+                    default: code
+                    description: StatusLabel is the label that holds each request's
+                      HTTP status code.
+                    pattern: ^[a-zA-Z_][a-zA-Z0-9_]*$
+                    type: string
+                required:
+                - port
+                type: object
               restartCrashingPods:
                 default: true
                 description: |-
@@ -418,6 +477,44 @@ spec:
                   for the current incident. A dismissal is any newer event in its slot.
                 format: int64
                 type: integer
+              requests:
+                description: |-
+                  Requests is what the workload's pods counted in the last minute, for a
+                  guard with spec.requests.
+                properties:
+                  at:
+                    description: At is when the pods were last read.
+                    format: date-time
+                    type: string
+                  errorRate:
+                    description: |-
+                      ErrorRate is Failed as a percentage of Total, such as 4.2%. It is
+                      empty when no requests were counted.
+                    type: string
+                  failed:
+                    description: Failed is how many of them failed with 5xx.
+                    format: int64
+                    type: integer
+                  podsRead:
+                    description: PodsRead is how many pods answered.
+                    format: int32
+                    type: integer
+                  total:
+                    description: Total is how many requests the pods counted in the
+                      minute up to At.
+                    format: int64
+                    type: integer
+                required:
+                - at
+                - failed
+                - podsRead
+                - total
+                type: object
+              requestsIncident:
+                description: |-
+                  RequestsIncident is true when failing requests, not pods or an alert,
+                  tripped the current incident.
+                type: boolean
               restoreRequest:
                 description: |-
                   RestoreRequest is the last value of the flagbreaker.dev/restore
