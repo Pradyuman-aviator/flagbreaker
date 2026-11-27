@@ -292,7 +292,7 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 	}
 	assessment := workload.Assess(pods, now, notReadyGrace)
 	// 2b. For a guard with spec.requests, read what the pods counted.
-	series, readsRequests := r.readRequests(ctx, guard, spec, t, pods, now)
+	series, notBefore, readsRequests := r.readRequests(ctx, guard, spec, t, pods, now)
 
 	// 3. Notice flag changes made by people. A switch-off during an
 	// incident, or a new value during one a value caused, is what watch mode
@@ -378,7 +378,8 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		RequestsIncident: st.RequestsIncident,
 	}
 	if readsRequests {
-		in.Requests = &breaker.Requests{Series: series, MaxErrorPercent: float64(spec.Requests.MaxErrorPercent), MinRequests: float64(spec.Requests.MinRequests)}
+		in.Requests = &breaker.Requests{Series: series, NotBefore: notBefore,
+			MaxErrorPercent: float64(spec.Requests.MaxErrorPercent), MinRequests: float64(spec.Requests.MinRequests)}
 		if limit, ok := s.ErrorLimit(spec.Flag); ok {
 			in.Requests.MaxErrorPercent, in.Requests.LimitFrom = limit, settings.PolicyFlag
 		}
@@ -1089,6 +1090,12 @@ func (r *FlagGuardReconciler) recover(ctx context.Context, guard *v1alpha1.FlagG
 	st := &guard.Status
 	st.Phase = v1alpha1.PhaseRecovered
 	st.RecoveredAt = metaNow(now)
+	if spec.Requests != nil && d.HealthySince != nil {
+		// The requests the pods counted up to here belong to the incident: a
+		// later change, such as a restore, is compared with the minute before
+		// it from here on, not with the incident's failures.
+		r.requestsTracker().Recovered(client.ObjectKeyFromObject(guard), *d.HealthySince)
+	}
 	addTimeline(st, now, "Recovered", strings.TrimSpace("Verified recovery: "+d.Why+". "+timings(st)))
 	if st.Snapshot != nil && (st.Snapshot.Enabled || pendingSegments(st) > 0) {
 		addTimeline(st, now, "RestoreAvailable", restoreHint(guard))

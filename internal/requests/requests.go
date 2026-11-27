@@ -256,6 +256,9 @@ type Result struct {
 	Read, Of int
 	// Err is the first pod's error, when a pod didn't answer.
 	Err error
+	// NotBefore is where the guard's last verified recovery began (see
+	// Recovered): what the pods counted up to then belongs to that incident.
+	NotBefore time.Time
 }
 
 // Tracker reads guards' workloads and keeps each guard's history. The history
@@ -302,6 +305,8 @@ type history struct {
 	lastRead time.Time
 	pods     map[podKey]Count // each pod's last reading
 	series   Series
+	// notBefore: the samples up to here belong to an incident that is over.
+	notBefore time.Time
 }
 
 // Read reads the workload's pods and adds what they counted since the last
@@ -321,15 +326,15 @@ func (t *Tracker) Read(ctx context.Context, guard types.NamespacedName, uid type
 	defer h.mu.Unlock()
 	if h.pods == nil || h.uid != uid || h.cfg != cfg || h.workload != workload {
 		h.uid, h.cfg, h.workload = uid, cfg, workload
-		h.lastRead, h.pods, h.series = time.Time{}, map[podKey]Count{}, nil
+		h.lastRead, h.pods, h.series, h.notBefore = time.Time{}, map[podKey]Count{}, nil, time.Time{}
 	}
 	if since := now.Sub(h.lastRead); !h.lastRead.IsZero() && since >= 0 && since < MinReadInterval {
-		return Result{Series: append(Series(nil), h.series...), Skipped: true}
+		return Result{Series: append(Series(nil), h.series...), Skipped: true, NotBefore: h.notBefore}
 	}
 	h.lastRead = now
 
 	readings := t.readAll(ctx, cfg, targets)
-	res := Result{Of: len(targets)}
+	res := Result{Of: len(targets), NotBefore: h.notBefore}
 	var delta Count
 	current := make(map[podKey]bool, len(targets))
 	for i, target := range targets {
@@ -372,6 +377,26 @@ func (t *Tracker) Read(ctx context.Context, guard types.NamespacedName, uid type
 	h.trim(now.Add(-keep))
 	res.Series = append(Series(nil), h.series...)
 	return res
+}
+
+// Recovered records that the guard's workload was verified healthy from
+// healthySince on, so what its pods counted up to then belongs to the
+// incident. Read reports it as NotBefore: the minute before a later flag
+// change starts no earlier, as crashes from before a verified recovery
+// belong to that incident and not to the next change. A guard with no
+// history gets none.
+func (t *Tracker) Recovered(guard types.NamespacedName, healthySince time.Time) {
+	t.mu.Lock()
+	h, ok := t.guards[guard]
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if healthySince.After(h.notBefore) {
+		h.notBefore = healthySince
+	}
 }
 
 // Forget drops a guard's history.

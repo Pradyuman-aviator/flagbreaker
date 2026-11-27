@@ -71,6 +71,16 @@ type Requests struct {
 	// LimitFrom names where MaxErrorPercent came from when it wasn't the
 	// FlagGuard: flagbreaker_policy.
 	LimitFrom string
+	// NotBefore is where the guard's last verified recovery began. What the
+	// pods counted up to then belongs to that incident, so the minute before
+	// a change starts no earlier, as for crashes.
+	NotBefore time.Time
+}
+
+// before is what the pods counted in the minute ending baselineGap before t,
+// from NotBefore on.
+func (rq *Requests) before(t time.Time) requests.Count {
+	return rq.Series.Between(later(t.Add(-baselineGap-requestSpan), rq.NotBefore), t.Add(-baselineGap))
 }
 
 // Alert is an active Unhealthy event from another Feature Health provider.
@@ -333,12 +343,14 @@ func decideTripped(in Input) Decision {
 // requests arrived and more than MaxErrorPercent of them failed; and in the
 // minute ending baselineGap before it, at least MinRequests arrived and no
 // more than MaxErrorPercent failed. Without enough traffic before the change
-// there is nothing to compare with, so the change isn't blamed.
+// there is nothing to compare with, so the change isn't blamed. That minute
+// never reaches back past the last verified recovery: an incident's failed
+// requests don't make the next change look like it came after a failure.
 func failedRequests(in Input, change *v1alpha1.FlagChange) (string, bool) {
 	rq := in.Requests
 	at := change.At.Time
 	after := rq.Series.Between(later(at, in.Now.Add(-requestSpan)), in.Now)
-	before := rq.Series.Between(at.Add(-baselineGap-requestSpan), at.Add(-baselineGap))
+	before := rq.before(at)
 	if after.Total < rq.MinRequests || !after.Over(rq.MaxErrorPercent) ||
 		before.Total < rq.MinRequests || before.Over(rq.MaxErrorPercent) {
 		return "", false

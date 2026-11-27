@@ -29,24 +29,24 @@ func (r *FlagGuardReconciler) requestsTracker() *requests.Tracker {
 // readRequests reads, for a guard with spec.requests, the request counter of
 // the workload's running pods, at most once every few seconds, and records
 // the last minute in status.requests and the RequestsRead condition. It
-// returns the guard's history, and whether the guard reads requests at all.
-// A guard without spec.requests reads nothing; what an earlier spec left in
-// its status is cleared.
+// returns the guard's history, where its last verified recovery began, and
+// whether the guard reads requests at all. A guard without spec.requests
+// reads nothing; what an earlier spec left in its status is cleared.
 func (r *FlagGuardReconciler) readRequests(ctx context.Context, guard *v1alpha1.FlagGuard, spec v1alpha1.FlagGuardSpec,
-	t target, pods []corev1.Pod, now time.Time) (requests.Series, bool) {
+	t target, pods []corev1.Pod, now time.Time) (requests.Series, time.Time, bool) {
 	st := &guard.Status
 	key := client.ObjectKeyFromObject(guard)
 	if spec.Requests == nil {
 		r.requestsTracker().Forget(key)
 		st.Requests = nil
 		meta.RemoveStatusCondition(&st.Conditions, conditionRequests)
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	rq := spec.Requests
 	cfg := requests.Config{Port: rq.Port, Path: rq.Path, Metric: rq.Metric, StatusLabel: rq.StatusLabel}
 	res := r.requestsTracker().Read(ctx, key, guard.UID, cfg, t.kind+"/"+t.obj.GetName(), requests.Targets(pods), now, requestsHistory(spec))
 	if res.Skipped {
-		return res.Series, true
+		return res.Series, res.NotBefore, true
 	}
 	switch {
 	case res.Read > 0:
@@ -64,7 +64,7 @@ func (r *FlagGuardReconciler) readRequests(ctx context.Context, guard *v1alpha1.
 		// requests rules have nothing new to judge.
 		setCondition(guard, conditionRequests, metav1.ConditionFalse, "ReadFailed", res.Err.Error())
 	}
-	return res.Series, true
+	return res.Series, res.NotBefore, true
 }
 
 // requestsHistory is how long a guard's readings are kept: the window for

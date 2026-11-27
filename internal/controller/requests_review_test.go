@@ -77,3 +77,72 @@ func TestRecoveryAtFractionalSecondsCountsOnlyTheRequestsSinceHealthySince(t *te
 		}
 	}
 }
+
+// trippedAndRecovered runs a requests incident: payments fail after the
+// switch-on at 10s, Flagbreaker switches the flag off at 15s, and it verifies
+// recovery at 40s, healthy since 20s.
+func trippedAndRecovered(t *testing.T) (*world, *fakeMetrics, *v1alpha1.FlagGuard) {
+	t.Helper()
+	w, m := requestsWorld(t, v1alpha1.ModeAct)
+	fineUntil10s(w, m)
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	m.traffic(1, 19)
+	if g := w.at(15 * time.Second); g.Status.Phase != v1alpha1.PhaseTripped {
+		t.Fatalf("want Tripped: %+v", g.Status)
+	}
+	var g *v1alpha1.FlagGuard
+	for s := 20; s <= 40; s += 5 {
+		m.traffic(30, 0)
+		g = w.at(time.Duration(s) * time.Second)
+	}
+	if g.Status.Phase != v1alpha1.PhaseRecovered {
+		t.Fatalf("want Recovered at 40s: %+v", g.Status)
+	}
+	return w, m, g
+}
+
+func TestARestoreAfterARequestsIncidentIsBlamedWhenPaymentsFailAgain(t *testing.T) {
+	w, m, g := trippedAndRecovered(t)
+	g.Annotations = map[string]string{v1alpha1.RestoreAnnotation: "1"}
+	if err := w.c.Update(w.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	m.traffic(30, 0)
+	if g := w.at(45 * time.Second); g.Status.Phase != v1alpha1.PhaseArmed {
+		t.Fatalf("want the flag restored and watched: %+v", g.Status)
+	}
+	m.traffic(1, 29)
+	g = w.at(50 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseTripped || !g.Status.RequestsIncident {
+		t.Fatalf("the restore is a change like any other, so it is blamed: %+v", g.Status)
+	}
+	// The minute before the restore starts where the verified recovery
+	// began, at 20s: the incident's own failures at 15s are left out.
+	want := "Deployment shop/checkout: 29 of 30 requests failed (96.7%, over the 5% limit) in the 5s after the flag was switched on by flagbreaker (restore) at 10:00:45 UTC, " +
+		"against 0 of 120 in the minute before; 2 of 2 pods ready"
+	if msg := g.Status.Timeline[1].Message; msg != want {
+		t.Fatalf("Tripped = %q\nwant      %q", msg, want)
+	}
+	if def, _ := w.flag(); def {
+		t.Fatal("the flag should be off again")
+	}
+}
+
+func TestAPersonsSwitchOnAfterARequestsIncidentIsBlamedWhenPaymentsFailAgain(t *testing.T) {
+	w, m, _ := trippedAndRecovered(t)
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	m.traffic(2, 28)
+	if g := w.at(45 * time.Second); g.Status.Phase != v1alpha1.PhaseArmed {
+		t.Fatalf("the flag is on again, so Flagbreaker watches it: %+v", g.Status)
+	}
+	m.traffic(1, 29)
+	g := w.at(50 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseTripped || !g.Status.RequestsIncident {
+		t.Fatalf("the switch-on must be blamed: %+v", g.Status)
+	}
+	want := "Deployment shop/checkout: 57 of 60 requests failed (95.0%, over the 5% limit) in the 10s after the flag was switched on at 10:00:40 UTC, " +
+		"against 0 of 90 in the minute before; 2 of 2 pods ready"
+	if msg := g.Status.Timeline[1].Message; msg != want {
+		t.Fatalf("Tripped = %q\nwant      %q", msg, want)
+	}
+}
