@@ -23,6 +23,7 @@ import (
 	"github.com/Pradyuman-aviator/flagbreaker/internal/changes"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/controller"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/flagsmith"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/requests"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/settings"
 )
 
@@ -118,6 +119,9 @@ func main() {
 		Changes:      store,
 		SyncPeriod:   syncPeriod,
 		WorkloadLink: linkTemplate,
+		// Reads the pods of guards with spec.requests: 2s per pod, no
+		// redirects, no proxy.
+		Requests: requests.NewTracker(nil),
 
 		RequireNamespaceOptIn: namespaceOptIn,
 	}
