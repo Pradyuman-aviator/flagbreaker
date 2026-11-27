@@ -33,7 +33,7 @@ func TestTheMinuteBeforeAChangeStartsAtTheLastVerifiedRecovery(t *testing.T) {
 // 5% limit. For some workloads that is normal.
 func noisyBefore() requests.Series { return every5s(-60*time.Second, -5*time.Second, 25, 2) }
 
-func TestATripOnThePodsOrAnAlertNotesRequestsThatAlreadyFailedBefore(t *testing.T) {
+func TestOnlyATripOnThePodsNotesRequestsThatAlreadyFailedBefore(t *testing.T) {
 	pods := failing(2, 0, t0.Add(4*time.Second), t0.Add(5*time.Second))
 	for name, c := range map[string]struct {
 		before requests.Series
@@ -52,10 +52,13 @@ func TestATripOnThePodsOrAnAlertNotesRequestsThatAlreadyFailedBefore(t *testing.
 		t.Errorf("a guard that doesn't read requests: got %+v", d)
 	}
 
+	// An alert's trip notes nothing. The minute before an alert is when the
+	// failures it reports began, not the workload's normal, so failing
+	// requests hold its recovery.
 	in := withRequests(armed(t0.Add(10*time.Second), switchedOn(t0.Add(-time.Hour)), ready), noisyBefore())
 	in.Alerts = []Alert{alert(41, t0)}
-	if d := Decide(in); d.Action != Trip || d.Cause != CauseAlert || !d.RequestsFailingBefore {
-		t.Errorf("an alert that started at t0: got %+v, want RequestsFailingBefore", d)
+	if d := Decide(in); d.Action != Trip || d.Cause != CauseAlert || d.RequestsFailingBefore {
+		t.Errorf("an alert that started at t0: got %+v, want no RequestsFailingBefore", d)
 	}
 }
 

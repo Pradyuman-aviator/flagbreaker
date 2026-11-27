@@ -159,10 +159,12 @@ type Input struct {
 	// RequestsIncident is true when failing requests tripped the current
 	// incident, so recovery needs requests that succeed.
 	RequestsIncident bool
-	// RequestsFailingBefore is true when more than MaxErrorPercent of the
-	// requests already failed in the minute before the current incident
-	// began. That is the workload's normal, so failing requests don't hold
-	// the recovery.
+	// RequestsFailingBefore is true when the pods tripped the current
+	// incident, and more than MaxErrorPercent of the requests already failed
+	// in the minute before the change. That is the workload's normal, so
+	// failing requests don't hold the recovery. An alert's incident never
+	// has it: the minute before an alert is when the failures it reports
+	// began.
 	RequestsFailingBefore bool
 }
 
@@ -187,9 +189,9 @@ type Decision struct {
 	// Acknowledge marks the triggering change as dismissed by a person, so
 	// it is never blamed again.
 	Acknowledge bool
-	// RequestsFailingBefore, for a trip on the pods or an alert, is true when
-	// more than MaxErrorPercent of the requests already failed in the minute
-	// before the change or the alert. See Input.RequestsFailingBefore.
+	// RequestsFailingBefore, for a trip on the pods, is true when more than
+	// MaxErrorPercent of the requests already failed in the minute before
+	// the change. See Input.RequestsFailingBefore.
 	RequestsFailingBefore bool
 }
 
@@ -239,7 +241,6 @@ func decideArmed(in Input) Decision {
 		if a := newestNewAlert(in.Alerts, in.HandledEventID, in.AlertsSince); a != nil {
 			d.Action, d.Cause, d.Alert = Trip, CauseAlert, a
 			d.Why = fmt.Sprintf("%s reported %q in Flagsmith Feature Health at %s UTC", a.Provider, a.Title, a.At.UTC().Format(time.TimeOnly))
-			d.RequestsFailingBefore = in.Requests.failingBefore(a.At)
 			return d
 		}
 	}
@@ -289,8 +290,8 @@ func decideArmed(in Input) Decision {
 // flag back on or dismisses the incident, and otherwise waits for the pods to
 // be healthy for StableFor and every other provider's alert to clear. For a
 // guard that reads requests, they must not be failing either, unless they
-// already failed as much before the incident; and after an incident they
-// caused, enough of them must have succeeded.
+// already failed as much before the change that crashed the pods; and after
+// an incident they caused, enough of them must have succeeded.
 func decideTripped(in Input) Decision {
 	if in.Dismissed {
 		return Decision{Action: Rearm, Mode: in.Mode, Acknowledge: true,
@@ -332,8 +333,8 @@ func decideTripped(in Input) Decision {
 	if rq != nil && !in.RequestsFailingBefore {
 		// Requests failing in the last minute count like a crash: the
 		// workload isn't healthy, however ready its pods are. Not when they
-		// already failed that much before the incident: that is the
-		// workload's normal, and the incident could never end.
+		// already failed that much before the change that crashed the pods:
+		// that is the workload's normal, and the incident could never end.
 		if recent := rq.Series.Between(later(start, in.Now.Add(-requestSpan)), in.Now); recent.Total >= rq.MinRequests && recent.Over(rq.MaxErrorPercent) {
 			return Decision{Mode: in.Mode}
 		}

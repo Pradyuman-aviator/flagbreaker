@@ -768,8 +768,8 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 	// Recovery from an incident that failing requests caused waits for
 	// requests that succeed.
 	st.RequestsIncident = d.Cause == breaker.CauseRequests
-	// Requests that already failed this much before the incident are the
-	// workload's normal, and don't hold the recovery.
+	// Requests that already failed this much before the change that crashed
+	// the pods are the workload's normal, and don't hold the recovery.
 	st.RequestsFailingBefore = d.RequestsFailingBefore
 	// Alerts that are active now belong to this incident; none of them may
 	// trip the guard again once it is re-armed.
