@@ -129,15 +129,21 @@ be ready with no new crash, and no other provider's alert may still be firing.
 A successful API call proves nothing about the workload, so Flagbreaker checks
 the workload itself. For a guard with `spec.requests`, at least `minRequests`
 requests failing over the limit in the last minute count like a crash: the
-wait for `stableFor` starts again. Not when more than the limit already
-failed in the minute before the change or the alert that caused the
-incident: that is the workload's normal, and the incident could never end.
-The trip notes it in `status.requestsFailingBefore`. After an incident that
-failing requests caused, at least `minRequests` requests must also have
-arrived since, with no more than the limit failing; without traffic the
-guard stays tripped, until readings come back or a person dismisses the
-incident. An incident the pods or an alert caused doesn't wait for traffic,
-and when the metrics can't be read, it recovers on the pods as before. With
+wait for `stableFor` starts again. That holds after an incident an alert or
+failing requests caused. After one the pods caused, it holds only if the
+minute before the change was fine, as the requests rule checks it: at least
+`minRequests` requests, with no more than the limit failing. The trip notes
+that in `status.requestsFineBefore`. If more than the limit failed in that
+minute, that is the workload's normal, and the incident could never end;
+with fewer than `minRequests`, as when a controller restart or a new
+`spec.requests` started the history just before the change, nothing shows
+it isn't. The minute before an alert says nothing about the normal: it is
+when the failures the alert reports began. After an incident that failing
+requests caused, at least `minRequests` requests must also have arrived
+since, with no more than the limit failing; without traffic the guard stays
+tripped, until readings come back or a person dismisses the incident. An
+incident the pods or an alert caused doesn't wait for traffic, and when the
+metrics can't be read, it recovers on the pods as before. With
 `restartCrashingPods`, the pods that crashed are deleted once the flag is
 off. They then come back in seconds, not after the kubelet's back-off, which
 can reach five minutes.
@@ -351,12 +357,17 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 - **The request history is in memory.** It keeps the guard's window, or
   stableFor if longer, plus 2 minutes, and at most 2000 readings. After a
   controller restart it starts over, so a change seen before the restart
-  isn't blamed for failing requests; the pods rule still applies.
+  isn't blamed for failing requests; the pods rule still applies. The minute
+  before a change made soon after a restart holds only what the pods
+  counted since.
 - **Request checking needs traffic:** `minRequests` in the minute before a
-  change and in the time after it.
+  change and in the time after it. With fewer before it, failing requests
+  don't hold the recovery when the pods trip on that change either.
 - **The limit must be above the workload's usual error rate.** Where more
   than `maxErrorPercent` of the requests fail anyway, no change is blamed for
-  failing requests, and they don't hold a recovery either.
+  failing requests, and they don't hold the recovery when the pods trip. An
+  incident an alert caused doesn't recover while they fail; dismiss it in
+  Flagsmith.
 - **Pods are read during the check, and the controller checks one guard at
   a time.** A guard whose pods don't answer on the metrics port, for example
   behind a NetworkPolicy that drops the traffic, delays every guard's checks

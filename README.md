@@ -227,11 +227,14 @@ kubectl annotate deployment checkout -n shop flagbreaker.dev/requests-port=8080
   previous value back; it restarts nothing, since nothing crashed. Feature
   Health gets the counts.
 - **Recovery is checked on the requests too.** Requests failing in the last
-  minute mean the workload isn't healthy yet, unless more than the limit
-  already failed in the minute before the incident: for that workload, that
-  is normal. After an incident failing requests caused, at least
-  `minRequests` requests must go through over `stableFor`, with no more than
-  the limit failing; without traffic, the guard stays tripped.
+  minute mean the workload isn't healthy yet, after an incident an alert or
+  failing requests caused. After one the pods caused, they count only if the
+  minute before the change was fine, as the rule needs: if more than the
+  limit failed then, that is normal for that workload, and with fewer than
+  `minRequests` requests, nothing shows it isn't. After an incident failing
+  requests caused, at least `minRequests` requests must go through over
+  `stableFor`, with no more than the limit failing; without traffic, the
+  guard stays tripped.
 - **Tune the limit from Flagsmith.** `{"new_payments": {"mode": "act",
   "maxErrorPercent": 2}}` in `flagbreaker_policy` replaces the guard's limit
   for that flag, decimals allowed. It never turns request reading on by
@@ -367,7 +370,7 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 169 Go tests cover the rules, the client, webhook verification,
+- **Tests.** 172 Go tests cover the rules, the client, webhook verification,
   reading request counters, and whole incidents run through `Reconcile`
   against a fake Flagsmith, including one per bug that two independent code
   reviews found. On every
@@ -402,13 +405,17 @@ stateDiagram-v2
   controller can reach: no TLS, no auth, no protobuf, no named ports.
 - **The request history lives in memory.** A change seen before a
   controller restart isn't blamed for failing requests; the pods rule still
-  applies to it.
+  applies to it. After a restart, the minute before a change holds only what
+  the pods counted since.
 - **It takes traffic.** `minRequests` requests are needed in the minute
   before a change and in the time after it, or failing requests aren't
-  blamed.
+  blamed. With fewer before it, they don't hold the recovery when the pods
+  trip on that change either.
 - **The limit must be above the workload's usual error rate.** Where more
   than `maxErrorPercent` of the requests fail anyway, no change is blamed for
-  failing requests, and they don't hold a recovery either.
+  failing requests, and they don't hold the recovery when the pods trip. An
+  incident an alert caused doesn't recover while they fail; dismiss it in
+  Flagsmith.
 - **Pods are read during the check, and the controller checks one guard at
   a time.** Pods that don't answer on the metrics port, for example behind a
   NetworkPolicy that drops the traffic, delay every guard's checks by up to

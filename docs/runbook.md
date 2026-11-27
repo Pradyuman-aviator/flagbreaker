@@ -62,7 +62,9 @@ flag again straight away.
 
 Wait for **Recovered**: every pod ready, with no new crashes, for
 `stableFor`. If the cause was another provider's alert, that alert must also
-resolve, or be dismissed.
+resolve, or be dismissed. On a guard that reads requests, requests failing
+over `maxErrorPercent` hold it back too: always after an alert, and after
+failing pods if the requests were fine in the minute before the change.
 
 If failing requests were the cause, no pod crashed, so none is restarted.
 Recovery then waits for requests to succeed: at least `minRequests` of them
@@ -101,7 +103,7 @@ After a switch-off, fix the cause first. Then do one of these:
 | Every flag, report only | Set `flagbreaker_mode` to `watch` |
 | One flag | Add it to `flagbreaker_policy`: `{"<flag>": {"mode": "watch"}}`, or `"off"` to ignore it |
 | One workload | `spec.mode: watch` on its FlagGuard, or the `flagbreaker.dev/mode: watch` annotation |
-| How many failed requests trip it | `maxErrorPercent` in `flagbreaker_policy`, such as `{"<flag>": {"maxErrorPercent": 10}}`, or in the FlagGuard's `spec.requests`, which a guard made from annotations keeps. Keep it above the workload's usual error rate: where more fail anyway, failing requests neither trip the guard nor hold its recovery |
+| How many failed requests trip it | `maxErrorPercent` in `flagbreaker_policy`, such as `{"<flag>": {"maxErrorPercent": 10}}`, or in the FlagGuard's `spec.requests`, which a guard made from annotations keeps. Keep it above the workload's usual error rate: where more fail anyway, failing requests trip nothing and don't hold the recovery from failing pods, but an incident an alert caused doesn't recover while they fail |
 | Failing requests, for one workload | Remove `spec.requests` from its FlagGuard (or the `flagbreaker.dev/requests-port` annotation); the pods are still watched |
 
 The most cautious setting wins. Flagbreaker never gets around change requests:
