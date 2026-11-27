@@ -4,7 +4,9 @@
 //   - flagbreaker_enabled: off pauses Flagbreaker everywhere.
 //   - flagbreaker_mode: its value, "watch" or "act", applies to every flag.
 //   - flagbreaker_policy: a JSON value with a mode per flag, for example
-//     {"new_pricing": {"mode": "watch"}, "db_migration": {"mode": "off"}}.
+//     {"new_pricing": {"mode": "watch"}, "db_migration": {"mode": "off"}},
+//     and, for guards that read requests, the share of failed requests that
+//     counts as failing: {"new_payments": {"mode": "act", "maxErrorPercent": 2}}.
 //
 // So the breaker is controlled from the same dashboard as the flags it
 // guards. Whenever the settings can't be read, Flagbreaker falls back to
@@ -36,6 +38,9 @@ const (
 // FlagPolicy is one flag's entry in flagbreaker_policy.
 type FlagPolicy struct {
 	Mode v1alpha1.Mode `json:"mode"`
+	// MaxErrorPercent replaces spec.requests.maxErrorPercent of the flag's
+	// guards. It never turns request reading on by itself.
+	MaxErrorPercent *float64 `json:"maxErrorPercent,omitempty"`
 }
 
 // Settings is what Flagbreaker should do right now.
@@ -103,6 +108,15 @@ func (s Settings) Resolve(flag string, specMode v1alpha1.Mode) Resolution {
 		return Resolution{Mode: v1alpha1.ModeAct, Reason: act.name + " says act and nothing says watch"}
 	}
 	return Resolution{Mode: v1alpha1.ModeWatch, Reason: "no setting says act, so watch"}
+}
+
+// ErrorLimit returns the maxErrorPercent flagbreaker_policy sets for a flag,
+// if it sets one. It replaces spec.requests.maxErrorPercent for that flag.
+func (s Settings) ErrorLimit(flag string) (float64, bool) {
+	if p, ok := s.Policies[flag]; ok && p.MaxErrorPercent != nil {
+		return *p.MaxErrorPercent, true
+	}
+	return 0, false
 }
 
 // Reader caches the settings for a few seconds.
@@ -201,6 +215,9 @@ func ParsePolicy(value string) (map[string]FlagPolicy, error) {
 		case v1alpha1.ModeAct, v1alpha1.ModeWatch, ModeOff, "":
 		default:
 			return nil, fmt.Errorf("%s gives %s the mode %q; use watch, act or off. Every flag is watched until it is fixed", PolicyFlag, flag, p.Mode)
+		}
+		if l := p.MaxErrorPercent; l != nil && !(*l > 0 && *l <= 100) {
+			return nil, fmt.Errorf("%s gives %s the maxErrorPercent %g; use a number above 0 and up to 100. Every flag is watched until it is fixed", PolicyFlag, flag, *l)
 		}
 	}
 	return policies, nil
