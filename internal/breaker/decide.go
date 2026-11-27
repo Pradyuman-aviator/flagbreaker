@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Pradyuman-aviator/flagbreaker/api/v1alpha1"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/requests"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/workload"
 )
 
@@ -40,11 +41,37 @@ const (
 	// CauseAlert means another Feature Health provider reported the flag
 	// unhealthy.
 	CauseAlert Cause = "alert"
+	// CauseRequests means requests to the workload started failing with 5xx
+	// after a flag change, while its pods stayed up.
+	CauseRequests Cause = "requests"
 )
 
 // rolloutSlack is how close to a flag change a rollout must start for the
 // breakage to count as possibly caused by the deploy.
 const rolloutSlack = 30 * time.Second
+
+const (
+	// requestSpan is how far back the requests rules look: the last minute,
+	// and the minute before a change.
+	requestSpan = time.Minute
+	// baselineGap: the minute before a change ends this long before it, to
+	// absorb clock skew and the read that straddles the change.
+	baselineGap = 5 * time.Second
+)
+
+// Requests is what a guard with spec.requests knows about the workload's
+// requests.
+type Requests struct {
+	// Series is what the pods counted, read by read, oldest first.
+	Series requests.Series
+	// MaxErrorPercent: more failed requests than this percentage is failing.
+	MaxErrorPercent float64
+	// MinRequests is how many requests the rules need to judge.
+	MinRequests float64
+	// LimitFrom names where MaxErrorPercent came from when it wasn't the
+	// FlagGuard: flagbreaker_policy.
+	LimitFrom string
+}
 
 // Alert is an active Unhealthy event from another Feature Health provider.
 type Alert struct {
@@ -104,6 +131,13 @@ type Input struct {
 
 	FlagDisabledAt *time.Time
 	HealthySince   *time.Time
+
+	// Requests is nil for a guard that doesn't read the workload's requests;
+	// the requests rules then don't apply.
+	Requests *Requests
+	// RequestsIncident is true when failing requests tripped the current
+	// incident, so recovery needs requests that succeed.
+	RequestsIncident bool
 }
 
 // Decision is what to do, and why.
@@ -156,10 +190,12 @@ func Decide(in Input) Decision {
 	}
 }
 
-// decideArmed trips in two cases. Pods: the flag was just switched on, or
+// decideArmed trips in three cases. Pods: the flag was just switched on, or
 // given a new value, the workload was fine before that, and enough pods
-// failed after it. Alert: another Feature Health provider marked the flag
-// unhealthy while it is on.
+// failed after it. Requests, for a guard that reads them, when the pods
+// didn't trip it: the same, with requests that fail where the minute before
+// the change was fine. Alert: another Feature Health provider marked the
+// flag unhealthy while it is on.
 func decideArmed(in Input) Decision {
 	d := Decision{Mode: in.Mode}
 	change := in.LastChange
@@ -193,13 +229,20 @@ func decideArmed(in Input) Decision {
 	}
 
 	failing := in.Pods.FailingSince(change.At.Time)
-	if len(failing) == 0 || len(failing) < in.FailingPods {
+	switch {
+	case len(failing) > 0 && len(failing) >= in.FailingPods:
+		d.Action, d.Cause, d.Failing = Trip, CausePods, failing
+		d.Why = fmt.Sprintf("%d of %d pods started failing %s after %s",
+			len(failing), in.Pods.Pods, roundDuration(failing[0].At.Sub(change.At.Time)), describeChange(change))
+	case in.Requests != nil:
+		why, ok := failedRequests(in, change)
+		if !ok {
+			return d
+		}
+		d.Action, d.Cause, d.Why = Trip, CauseRequests, why
+	default:
 		return d
 	}
-
-	d.Action, d.Cause, d.Failing = Trip, CausePods, failing
-	d.Why = fmt.Sprintf("%d of %d pods started failing %s after %s",
-		len(failing), in.Pods.Pods, roundDuration(failing[0].At.Sub(change.At.Time)), describeChange(change))
 
 	if !in.RolloutStartedAt.IsZero() && !in.RolloutStartedAt.Before(change.At.Time.Add(-rolloutSlack)) {
 		d.Mode = v1alpha1.ModeWatch
@@ -212,7 +255,9 @@ func decideArmed(in Input) Decision {
 
 // decideTripped retries a failed switch-off, re-arms when a person turns the
 // flag back on or dismisses the incident, and otherwise waits for the pods to
-// be healthy for StableFor and every other provider's alert to clear.
+// be healthy for StableFor and every other provider's alert to clear. For a
+// guard that reads requests, they must not be failing either, and after an
+// incident they caused, enough of them must have succeeded.
 func decideTripped(in Input) Decision {
 	if in.Dismissed {
 		return Decision{Action: Rearm, Mode: in.Mode, Acknowledge: true,
@@ -250,17 +295,72 @@ func decideTripped(in Input) Decision {
 	if !in.Pods.HealthySince(start, in.DesiredReplicas) {
 		return Decision{Mode: in.Mode}
 	}
+	rq := in.Requests
+	if rq != nil {
+		// Requests failing in the last minute count like a crash: the
+		// workload isn't healthy, however ready its pods are.
+		if recent := rq.Series.Between(later(start, in.Now.Add(-requestSpan)), in.Now); recent.Total >= rq.MinRequests && recent.Over(rq.MaxErrorPercent) {
+			return Decision{Mode: in.Mode}
+		}
+	}
 	d := Decision{Mode: in.Mode, HealthySince: &start}
 	if len(in.Alerts) > 0 {
 		// Healthy pods don't overrule another provider: its alert must
 		// resolve, or a person must dismiss it, first.
 		return d
 	}
+	var since requests.Count
+	if rq != nil {
+		since = rq.Series.Between(start, in.Now)
+	}
 	if stable := in.Now.Sub(start); stable >= in.StableFor {
+		if in.RequestsIncident && rq != nil && (since.Total < rq.MinRequests || since.Over(rq.MaxErrorPercent)) {
+			// Failing requests caused this incident, so only requests that
+			// succeed again show it is over. Without traffic, keep waiting.
+			return d
+		}
 		d.Action = Recover
 		d.Why = fmt.Sprintf("all %d pods ready with no new crashes for %s", in.Pods.Pods, roundDuration(stable))
+		if rq != nil && since.Total > 0 {
+			d.Why += fmt.Sprintf(", and %.0f of %.0f requests failed in that time", since.Failed, since.Total)
+		}
 	}
 	return d
+}
+
+// failedRequests applies the requests rule to a change: after it (in the
+// last minute, or since the change if that is later), at least MinRequests
+// requests arrived and more than MaxErrorPercent of them failed; and in the
+// minute ending baselineGap before it, at least MinRequests arrived and no
+// more than MaxErrorPercent failed. Without enough traffic before the change
+// there is nothing to compare with, so the change isn't blamed.
+func failedRequests(in Input, change *v1alpha1.FlagChange) (string, bool) {
+	rq := in.Requests
+	at := change.At.Time
+	after := rq.Series.Between(later(at, in.Now.Add(-requestSpan)), in.Now)
+	before := rq.Series.Between(at.Add(-baselineGap-requestSpan), at.Add(-baselineGap))
+	if after.Total < rq.MinRequests || !after.Over(rq.MaxErrorPercent) ||
+		before.Total < rq.MinRequests || before.Over(rq.MaxErrorPercent) {
+		return "", false
+	}
+	limit := fmt.Sprintf("%g%% limit", rq.MaxErrorPercent)
+	if rq.LimitFrom != "" {
+		limit += " in " + rq.LimitFrom
+	}
+	age := roundDuration(in.Now.Sub(at))
+	when := fmt.Sprintf("in the %s after %s", age, describeChange(change))
+	if in.Now.Sub(at) > requestSpan {
+		when = fmt.Sprintf("in the last minute, %s after %s", age, describeChange(change))
+	}
+	return fmt.Sprintf("%.0f of %.0f requests failed (%.1f%%, over the %s) %s, against %.0f of %.0f in the minute before; %d of %d pods ready",
+		after.Failed, after.Total, after.Percent(), limit, when, before.Failed, before.Total, in.Pods.Ready, in.Pods.Pods), true
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 func newestNewAlert(alerts []Alert, handled int64, since time.Time) *Alert {
