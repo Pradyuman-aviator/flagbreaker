@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Pradyuman-aviator/flagbreaker/api/v1alpha1"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/requests"
 )
 
 // ms is a time after t0 in milliseconds. In a cluster, checks come at any
@@ -144,5 +145,64 @@ func TestAPersonsSwitchOnAfterARequestsIncidentIsBlamedWhenPaymentsFailAgain(t *
 		"against 0 of 90 in the minute before; 2 of 2 pods ready"
 	if msg := g.Status.Timeline[1].Message; msg != want {
 		t.Fatalf("Tripped = %q\nwant      %q", msg, want)
+	}
+}
+
+// podsIncident: before the switch-on, `before` of every 50 requests fail
+// with 5xx. The switch-on crashes the pods at 12s, Flagbreaker trips on the
+// pods at 15s and switches the flag off, and new pods are up at 17s. From
+// 25s on, `after` of every 50 fail. It returns the guard at 15s, and at
+// each check from 25s to 60s.
+func podsIncident(t *testing.T, before, after int) (*v1alpha1.FlagGuard, map[int]*v1alpha1.FlagGuard) {
+	t.Helper()
+	w, m := requestsWorld(t, v1alpha1.ModeAct)
+	w.at(0)
+	for s := 5; s <= 10; s += 5 {
+		m.traffic(50-before, before)
+		w.at(time.Duration(s) * time.Second)
+	}
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	w.crashPods(t0.Add(12 * time.Second))
+	tripped := w.at(15 * time.Second)
+	w.healthyPods(2, t0.Add(17*time.Second))
+	m.set(func(m *fakeMetrics) { m.pods = map[string]*requests.Count{} }) // the crashed pods are gone
+	w.giveIPs(m)
+	w.at(20 * time.Second) // the new pods: where their counting starts
+	checks := map[int]*v1alpha1.FlagGuard{}
+	for s := 25; s <= 60; s += 5 {
+		m.traffic(50-after, after)
+		checks[s] = w.at(time.Duration(s) * time.Second)
+	}
+	return tripped, checks
+}
+
+func TestAPodsIncidentOnAWorkloadThatAlwaysFailsSomeRequestsRecovers(t *testing.T) {
+	// 8% of the requests fail before the incident and after it: over the 5%
+	// limit, but that is how this workload is.
+	tripped, checks := podsIncident(t, 4, 4)
+	if tripped.Status.Phase != v1alpha1.PhaseTripped || tripped.Status.RequestsIncident || !tripped.Status.RequestsFailingBefore {
+		t.Fatalf("want a pods trip that notes the requests already failed before: %+v", tripped.Status)
+	}
+	g := checks[40] // healthy since 20s, for stableFor
+	if g.Status.Phase != v1alpha1.PhaseRecovered {
+		t.Fatalf("the workload's usual failures must not hold the recovery: %+v", g.Status)
+	}
+	for _, e := range g.Status.Timeline {
+		if e.Event == "Recovered" && !strings.HasPrefix(e.Message, "Verified recovery: all 2 pods ready with no new crashes for 20s, and 16 of 200 requests failed in that time.") {
+			t.Fatalf("Recovered = %q", e.Message)
+		}
+	}
+}
+
+func TestAPodsIncidentStillWaitsForRequestsThatWereFineBefore(t *testing.T) {
+	// None failed before the switch-on; after the incident, 8% do.
+	tripped, checks := podsIncident(t, 0, 4)
+	if tripped.Status.Phase != v1alpha1.PhaseTripped || tripped.Status.RequestsFailingBefore {
+		t.Fatalf("want a pods trip: %+v", tripped.Status)
+	}
+	for s := 25; s <= 60; s += 5 {
+		if g := checks[s]; g.Status.Phase != v1alpha1.PhaseTripped {
+			t.Fatalf("at %ds: requests that fail more than before must hold the recovery: %+v", s, g.Status)
+		}
 	}
 }

@@ -354,6 +354,13 @@ type FlagGuardStatus struct {
 	// +optional
 	RequestsIncident bool `json:"requestsIncident,omitempty"`
 
+	// RequestsFailingBefore is true when, in the minute before the change or
+	// the alert that caused the current incident, more than maxErrorPercent
+	// of the workload's requests already failed. That is then the workload's
+	// normal, so failing requests don't hold the recovery.
+	// +optional
+	RequestsFailingBefore bool `json:"requestsFailingBefore,omitempty"`
+
 	// Requests is what the workload's pods counted in the last minute, for a
 	// guard with spec.requests.
 	// +optional

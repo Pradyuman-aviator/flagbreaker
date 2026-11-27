@@ -510,6 +510,13 @@ spec:
                 - podsRead
                 - total
                 type: object
+              requestsFailingBefore:
+                description: |-
+                  RequestsFailingBefore is true when, in the minute before the change or
+                  the alert that caused the current incident, more than maxErrorPercent
+                  of the workload's requests already failed. That is then the workload's
+                  normal, so failing requests don't hold the recovery.
+                type: boolean
               requestsIncident:
                 description: |-
                   RequestsIncident is true when failing requests, not pods or an alert,
