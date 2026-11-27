@@ -219,16 +219,19 @@ kubectl annotate deployment checkout -n shop flagbreaker.dev/requests-port=8080
   `minRequests` requests arrived and more than `maxErrorPercent` of them
   failed, the change is blamed, even with every pod up and ready. That holds
   only if the minute before the change was fine: at least `minRequests`
-  requests, with no more than `maxErrorPercent` failing.
+  requests, with no more than `maxErrorPercent` failing. That minute never
+  reaches back past the last verified recovery, so a restore just after an
+  incident is compared with the requests since, not with the incident's.
 - **The rest is as for pods.** The same `window`, rollout and
   already-failing rules apply. Act mode switches the flag off, or puts the
   previous value back; it restarts nothing, since nothing crashed. Feature
   Health gets the counts.
 - **Recovery is checked on the requests too.** Requests failing in the last
-  minute mean the workload isn't healthy yet. After an incident failing
-  requests caused, at least `minRequests` requests must go through over
-  `stableFor`, with no more than the limit failing; without traffic, the
-  guard stays tripped.
+  minute mean the workload isn't healthy yet, unless more than the limit
+  already failed in the minute before the incident: for that workload, that
+  is normal. After an incident failing requests caused, at least
+  `minRequests` requests must go through over `stableFor`, with no more than
+  the limit failing; without traffic, the guard stays tripped.
 - **Tune the limit from Flagsmith.** `{"new_payments": {"mode": "act",
   "maxErrorPercent": 2}}` in `flagbreaker_policy` replaces the guard's limit
   for that flag, decimals allowed. It never turns request reading on by
@@ -259,7 +262,10 @@ kubectl annotate deployment checkout -n shop flagbreaker.dev/requests-port=8080
 In the demo, `bash hack/demo/break.sh new_payments` switches on a payment
 provider that fails every payment. The incident timeline says how many
 requests failed, against how many in the minute before, and that every pod
-stayed ready; the recovery entry says how many went through.
+stayed ready; the recovery entry says how many went through. If another
+scenario just crashed the shop's pods, give it a minute first: a crash in
+the minute before the switch-on means the shop was already failing, so the
+flag isn't blamed.
 
 <!-- Paste here the timeline that hack/demo/e2e-errors.sh prints ("passed. Timeline:") in the first green CI run, as a code block like the new_pricing one above. Copy it; don't type numbers. -->
 
@@ -361,7 +367,7 @@ stateDiagram-v2
   `flagbreaker_detection_seconds` and `flagbreaker_recovery_seconds`.
 - **The design notes,** in [docs/design.md](docs/design.md), cover the full
   rules, every Flagsmith endpoint, the safety measures and the metrics.
-- **Tests.** 168 Go tests cover the rules, the client, webhook verification,
+- **Tests.** 169 Go tests cover the rules, the client, webhook verification,
   reading request counters, and whole incidents run through `Reconcile`
   against a fake Flagsmith, including one per bug that two independent code
   reviews found. On every
@@ -400,6 +406,15 @@ stateDiagram-v2
 - **It takes traffic.** `minRequests` requests are needed in the minute
   before a change and in the time after it, or failing requests aren't
   blamed.
+- **The limit must be above the workload's usual error rate.** Where more
+  than `maxErrorPercent` of the requests fail anyway, no change is blamed for
+  failing requests, and they don't hold a recovery either.
+- **Pods are read during the check, and the controller checks one guard at
+  a time.** Pods that don't answer on the metrics port, for example behind a
+  NetworkPolicy that drops the traffic, delay every guard's checks by up to
+  3 s each time they are read, at most every 4 s per guard. `RequestsRead`
+  says why; allow the port, or remove `spec.requests` from that guard until
+  they answer.
 - **Only 5xx counts.** A wrong page served with 200, or a change that stops
   requests from arriving at all, isn't seen.
 - **An outage elsewhere can be blamed.** If a downstream service starts

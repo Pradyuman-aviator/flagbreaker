@@ -108,7 +108,9 @@ stateDiagram-v2
   the minute before it, or when fewer than `minRequests` arrived then: with
   nothing to compare with, the change isn't blamed. That minute ends 5 s
   before the change, which absorbs clock skew and the read that straddles
-  the change.
+  the change. It never starts before the last verified recovery began, so
+  an incident's failed requests count for that incident, as its crashes do,
+  and not against the next change, such as a restore.
 - A change near a rollout: if the workload rolled out any time from 30 s
   before the change onward, the deploy may be the cause, so the trip only
   reports and leaves the flag on.
@@ -127,14 +129,18 @@ be ready with no new crash, and no other provider's alert may still be firing.
 A successful API call proves nothing about the workload, so Flagbreaker checks
 the workload itself. For a guard with `spec.requests`, at least `minRequests`
 requests failing over the limit in the last minute count like a crash: the
-wait for `stableFor` starts again. After an incident that failing requests
-caused, at least `minRequests` requests must also have arrived since, with no
-more than the limit failing; without traffic the guard stays tripped, until
-readings come back or a person dismisses the incident. An incident the pods
-or an alert caused doesn't wait for traffic, and when the metrics can't be
-read, it recovers on the pods as before. With `restartCrashingPods`, the pods that crashed are
-deleted once the flag is off. They then come back in seconds, not after the
-kubelet's back-off, which can reach five minutes.
+wait for `stableFor` starts again. Not when more than the limit already
+failed in the minute before the change or the alert that caused the
+incident: that is the workload's normal, and the incident could never end.
+The trip notes it in `status.requestsFailingBefore`. After an incident that
+failing requests caused, at least `minRequests` requests must also have
+arrived since, with no more than the limit failing; without traffic the
+guard stays tripped, until readings come back or a person dismisses the
+incident. An incident the pods or an alert caused doesn't wait for traffic,
+and when the metrics can't be read, it recovers on the pods as before. With
+`restartCrashingPods`, the pods that crashed are deleted once the flag is
+off. They then come back in seconds, not after the kubelet's back-off, which
+can reach five minutes.
 
 **A bad value is put back, not switched off.** Remote config is read
 whether or not the flag is on: the Flagsmith Go SDK's `GetFeatureValue`
@@ -281,8 +287,8 @@ The annotation can also set these options:
 | `flagbreaker.dev/requests-status-label` | `spec.requests.statusLabel` (`code`) |
 
 An invalid requests annotation raises a Warning event, and the guard is made
-without `spec.requests`. The limits aren't annotations: set them on a
-FlagGuard, or in `flagbreaker_policy`.
+without `spec.requests`. The limits aren't annotations: set them on the
+FlagGuard, where a generated guard keeps them, or in `flagbreaker_policy`.
 
 ## Metrics
 
@@ -348,6 +354,15 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
   isn't blamed for failing requests; the pods rule still applies.
 - **Request checking needs traffic:** `minRequests` in the minute before a
   change and in the time after it.
+- **The limit must be above the workload's usual error rate.** Where more
+  than `maxErrorPercent` of the requests fail anyway, no change is blamed for
+  failing requests, and they don't hold a recovery either.
+- **Pods are read during the check, and the controller checks one guard at
+  a time.** A guard whose pods don't answer on the metrics port, for example
+  behind a NetworkPolicy that drops the traffic, delays every guard's checks
+  by up to 3 s per read, at most every 4 s. Reading in the background, or
+  more workers, would end that; both change how checks run, so they are left
+  for later.
 - **Only 5xx counts as failed.** A wrong page served with 200, or a change
   that stops requests from arriving at all, isn't seen.
 - **An outage elsewhere that starts within the window can be blamed** on

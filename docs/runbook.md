@@ -101,7 +101,7 @@ After a switch-off, fix the cause first. Then do one of these:
 | Every flag, report only | Set `flagbreaker_mode` to `watch` |
 | One flag | Add it to `flagbreaker_policy`: `{"<flag>": {"mode": "watch"}}`, or `"off"` to ignore it |
 | One workload | `spec.mode: watch` on its FlagGuard, or the `flagbreaker.dev/mode: watch` annotation |
-| How many failed requests trip it | `maxErrorPercent` in `flagbreaker_policy`, such as `{"<flag>": {"maxErrorPercent": 10}}`, or in the FlagGuard's `spec.requests` |
+| How many failed requests trip it | `maxErrorPercent` in `flagbreaker_policy`, such as `{"<flag>": {"maxErrorPercent": 10}}`, or in the FlagGuard's `spec.requests`, which a guard made from annotations keeps. Keep it above the workload's usual error rate: where more fail anyway, failing requests neither trip the guard nor hold its recovery |
 | Failing requests, for one workload | Remove `spec.requests` from its FlagGuard (or the `flagbreaker.dev/requests-port` annotation); the pods are still watched |
 
 The most cautious setting wins. Flagbreaker never gets around change requests:
