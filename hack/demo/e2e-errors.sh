@@ -35,9 +35,16 @@ webhook_text() {
 reset_demo
 require_settled_guard $G
 wait_for_settled_rollout
+# e2e-value can leave a crash on a checkout pod that Flagbreaker didn't
+# restart; in the minute before the switch-on, it would mean the workload
+# was already failing.
+wait_for_crash_free_minute
 
-log "1. waiting for a clean baseline: at least 20 checkouts in the last minute, none failed"
-wait_for $G 150 '(.status.requests.total // 0) >= 20 and .status.requests.failed == 0 and any(.status.conditions[]?; .type == "RequestsRead" and .status == "True")'
+# The rule needs 20 checkouts in the minute before the switch-on, and that
+# minute ends 5s before the change, which polling may date up to 5s early.
+# 100 in the last minute, 20s of shopping, leave enough for that.
+log "1. waiting for a clean baseline: at least 100 checkouts in the last minute, none failed"
+wait_for $G 150 '(.status.requests.total // 0) >= 100 and .status.requests.failed == 0 and any(.status.conditions[]?; .type == "RequestsRead" and .status == "True")'
 log "   $(guard $G | jq -r '.status.requests | "\(.total) checkouts in the last minute, \(.failed) failed, read from \(.podsRead) pods"')"
 before="$(pods_now)"
 

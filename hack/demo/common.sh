@@ -147,6 +147,26 @@ wait_for_settled_rollout() {
   done
 }
 
+# wait_for_crash_free_minute: Flagbreaker doesn't blame a flag for a
+# breakage that came first, and a checkout pod that crashed in the minute
+# before a change counts as one. Kubernetes keeps a container's last crash,
+# so a test that follows another test's crashes, such as one on a pod that
+# Flagbreaker didn't restart, waits until the newest is 65s old.
+wait_for_crash_free_minute() {
+  local newest age i
+  for ((i = 0; i < 120; i++)); do
+    newest="$("$KUBECTL" get pods -n shop -l app=checkout -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)
+      | .status.containerStatuses[]? | (.state.terminated, .lastState.terminated)
+      | select(. != null and (.exitCode != 0 or .reason == "OOMKilled")) | .finishedAt] | max // empty')"
+    [[ -n "$newest" ]] || return 0
+    age=$(($(date -u +%s) - $(epoch_of "$newest")))
+    ((age >= 65)) && return 0
+    ((i == 0)) && log "waiting $((65 - age))s for the checkout pods' last crash to be a minute old (Flagbreaker doesn't blame a flag for a breakage that came first)"
+    sleep 1
+  done
+  die "a checkout pod kept crashing: $("$KUBECTL" get pods -n shop -l app=checkout 2>&1)"
+}
+
 print_timeline() {
   guard "$1" | jq -r '.status.timeline[]? | "  \(.time)  \(.message)"'
 }
