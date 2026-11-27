@@ -3,8 +3,9 @@
 Flagbreaker is a Kubernetes controller that connects Kubernetes workload
 health to [Flagsmith Feature Health](https://docs.flagsmith.com/advanced-use/feature-health).
 When a workload breaks right after a flag is switched on or given a new
-value, or another Feature Health provider marks the flag unhealthy,
-Flagbreaker:
+value (its pods fail or, for a guard that reads requests, its requests start
+failing with 5xx), or another Feature Health provider marks the flag
+unhealthy, Flagbreaker:
 
 1. reports Unhealthy to Feature Health, with an incident timeline;
 2. in act mode, switches the flag off in that environment, for its default
@@ -31,6 +32,7 @@ flowchart LR
   end
   subgraph Kubernetes
     P[pods, ReplicaSets,<br/>ControllerRevisions]
+    R[the pods' request counters<br/>/metrics, with spec.requests]
     G[FlagGuard]
   end
   F --> C{{Decide}}
@@ -38,6 +40,7 @@ flowchart LR
   H --> C
   S --> C
   P --> C
+  R --> C
   G --> C
   C -->|switch off / restore| F
   C -->|Unhealthy / Healthy| H
@@ -46,7 +49,8 @@ flowchart LR
 ```
 
 Every check, run per FlagGuard, does the following:
-- It reads the flag, the workload's pods and Feature Health.
+- It reads the flag, the workload's pods and Feature Health, and for a guard
+  with `spec.requests`, the request counter of each pod, at most every 4 s.
 - It asks one pure function, [`breaker.Decide`](../internal/breaker/decide.go), what to do, then does it.
 
 A check runs:
@@ -56,15 +60,16 @@ A check runs:
 - every `--sync-period` (5 s by default).
 
 The guard's status holds all incident state, so the controller can restart at
-any time.
+any time. The one exception is the history of request counts, which lives in
+memory: after a restart it starts over.
 
 ## States
 
 ```mermaid
 stateDiagram-v2
   [*] --> Armed
-  Armed --> Tripped: pods fail after the flag is switched on<br/>or gets a new value, or another provider's alert fires
-  Tripped --> Recovered: all pods ready, no new crash for stableFor,<br/>and no alert still firing
+  Armed --> Tripped: pods fail, or requests fail, after the flag is switched on<br/>or gets a new value, or another provider's alert fires
+  Tripped --> Recovered: all pods ready, no new crash for stableFor,<br/>requests not failing, and no alert still firing
   Tripped --> Armed: a person turns the flag back on,<br/>or dismisses the incident in Flagsmith
   Recovered --> Armed: the flag is on again<br/>(by a person, or the restore annotation), it gets a new value,<br/>or at once after an incident a new value alone caused
 ```
@@ -80,6 +85,15 @@ stateDiagram-v2
   minute of being created, with no restarts, is still starting up and doesn't
   count; evicted pods don't either. A workload that is still crash-looping
   from before the change, however long its back-off, is never blamed on it.
+- **Requests**, for a guard with `spec.requests`, when the pods rule didn't
+  trip: the same change, with the same window and checks, and both of these
+  hold. After the change (in the last minute, or since the change if that is
+  later), at least `minRequests` requests arrived and more than
+  `maxErrorPercent` of them failed. In the minute ending 5 s before the
+  change, at least `minRequests` requests arrived and no more than
+  `maxErrorPercent` failed. Every series of the metric counts toward the
+  total, and a series whose status label starts with 5 counts as failed;
+  4xx is handled, not failed. Every pod may be up and ready.
 - **Alert**: the flag's environment default is on, and another Feature
   Health provider has an Unhealthy event for this
   flag that started after the flag was switched on. It counts whether the
@@ -90,6 +104,11 @@ stateDiagram-v2
 - A change made while the workload was already failing, in the minute
   before. Kubernetes keeps a container's last crash for a long time, so
   older crashes don't count.
+- Failing requests after a change, when requests were already failing in
+  the minute before it, or when fewer than `minRequests` arrived then: with
+  nothing to compare with, the change isn't blamed. That minute ends 5 s
+  before the change, which absorbs clock skew and the read that straddles
+  the change.
 - A change near a rollout: if the workload rolled out any time from 30 s
   before the change onward, the deploy may be the cause, so the trip only
   reports and leaves the flag on.
@@ -106,7 +125,14 @@ stateDiagram-v2
 **Recovery is verified.** For `stableFor` after the switch-off, every pod must
 be ready with no new crash, and no other provider's alert may still be firing.
 A successful API call proves nothing about the workload, so Flagbreaker checks
-the workload itself. With `restartCrashingPods`, the pods that crashed are
+the workload itself. For a guard with `spec.requests`, at least `minRequests`
+requests failing over the limit in the last minute count like a crash: the
+wait for `stableFor` starts again. After an incident that failing requests
+caused, at least `minRequests` requests must also have arrived since, with no
+more than the limit failing; without traffic the guard stays tripped, until
+readings come back or a person dismisses the incident. An incident the pods
+or an alert caused doesn't wait for traffic, and when the metrics can't be
+read, it recovers on the pods as before. With `restartCrashingPods`, the pods that crashed are
 deleted once the flag is off. They then come back in seconds, not after the
 kubelet's back-off, which can reach five minutes.
 
@@ -150,7 +176,7 @@ With no answer at all, it watches.
 | Setting | Where | Scope |
 |---|---|---|
 | `spec.mode`, or the `flagbreaker.dev/mode` annotation | Kubernetes | one guard |
-| `flagbreaker_policy`, for example `{"new_pricing": {"mode": "watch"}}` | Flagsmith remote config | one flag (`off` ignores it) |
+| `flagbreaker_policy`, for example `{"new_pricing": {"mode": "watch"}, "new_payments": {"mode": "act", "maxErrorPercent": 2}}` | Flagsmith remote config | one flag (`off` ignores it) |
 | `flagbreaker_mode` (`watch` or `act`) | Flagsmith remote config | every flag |
 | `flagbreaker_enabled` | Flagsmith flag | off pauses everything |
 
@@ -160,6 +186,12 @@ These settings can also change the mode during an incident:
 - A switch to `act` never takes effect mid-incident.
 - If Flagsmith can't be read, or the policy is invalid JSON, Flagbreaker
   watches.
+
+A policy entry's `maxErrorPercent`, a number above 0 and up to 100 (decimals
+allowed), replaces `spec.requests.maxErrorPercent` for that flag's guards,
+and the trip says it came from `flagbreaker_policy`. It never turns request
+reading on by itself. Any other value makes the whole policy invalid, so
+every flag is watched and `SettingsValid` is False until it is fixed.
 
 ## Flagsmith APIs used
 
@@ -174,10 +206,12 @@ against 2.295.2.
 | `GET /api/v1/projects/{id}/feature-health/events/` | other providers' alerts, and dismissals of Flagbreaker's own events | org API key |
 | `POST /api/v1/feature-health/{signed-path}` (Webhook provider) | report Unhealthy and Healthy, with text and URL blocks | the signed path |
 | environment webhook `FLAG_UPDATED` (HMAC-SHA256 `X-Flagsmith-Signature`) | exact time and author of a switch or a value change | shared secret |
-| Flagsmith Go SDK, `GetEnvironmentFlags` | the breaker's own settings | environment key |
+| Flagsmith Go SDK, `GetEnvironmentFlags` | the breaker's own settings, including `maxErrorPercent` in `flagbreaker_policy` | environment key |
 
 The `__future__` endpoint works with and without feature versioning. The older
-feature-state endpoints return 400 under versioning v2.
+feature-state endpoints return 400 under versioning v2. Request checking uses
+no new endpoint: the counts come from the pods, and the trip, the fix and the
+report go through the endpoints above.
 
 ## Safety
 
@@ -197,6 +231,16 @@ feature-state endpoints return 400 under versioning v2.
 - **What it never touches.** It doesn't change identity overrides or
   experiments' system segments. The timeline says so instead of claiming a
   clean switch-off.
+- **What it reads.** For a guard with `spec.requests`, Flagbreaker sends
+  `GET http://<pod IP>:<port><path>` only to the guarded workload's own
+  running pods, at most 20, by name; the spec holds no URLs. Pods on the
+  host network are skipped, since their ports are the node's. It goes
+  through no proxy and follows no redirects. It reads at most once every
+  4 s per guard, gives each pod 2 s and a whole read 3 s, and refuses
+  answers over 8 MiB. Only the named metric's lines are parsed, and an
+  error is capped at 200 characters, so an answer is never echoed into the
+  status. A guard without `spec.requests` reads nothing, and a guard that
+  fails the namespace fence reads no pods either.
 - **One health slot.** Feature Health keeps one Webhook-provider status per
   flag and environment. Healthy is reported only when every guard of that flag
   has recovered.
@@ -231,6 +275,14 @@ The annotation can also set these options:
 | `flagbreaker.dev/mode` | `spec.mode` |
 | `flagbreaker.dev/stable-for` | `spec.stableFor` |
 | `flagbreaker.dev/runbook-url` | a Runbook link in every Feature Health event |
+| `flagbreaker.dev/requests-port` | `spec.requests.port`; turns request reading on, with the other fields at their defaults |
+| `flagbreaker.dev/requests-path` | `spec.requests.path` (`/metrics`) |
+| `flagbreaker.dev/requests-metric` | `spec.requests.metric` (`http_requests_total`) |
+| `flagbreaker.dev/requests-status-label` | `spec.requests.statusLabel` (`code`) |
+
+An invalid requests annotation raises a Warning event, and the guard is made
+without `spec.requests`. The limits aren't annotations: set them on a
+FlagGuard, or in `flagbreaker_policy`.
 
 ## Metrics
 
@@ -238,7 +290,7 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 
 | Metric | What it counts or measures |
 |---|---|
-| `flagbreaker_trips_total` | trips, by guard, flag, environment, mode and cause (`pods` or `alert`) |
+| `flagbreaker_trips_total` | trips, by guard, flag, environment, mode and cause (`pods`, `requests` or `alert`) |
 | `flagbreaker_switch_offs_total` | switch-offs, by who did it (`flagbreaker` or `person`) |
 | `flagbreaker_value_reverts_total` | bad values changed back, by who did it (`flagbreaker` or `person`) |
 | `flagbreaker_recoveries_total` | verified recoveries |
@@ -254,6 +306,9 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 - `go test ./...` runs these suites:
   - [`breaker`](../internal/breaker/decide_test.go): the decision rules.
   - [`workload`](../internal/workload/assess_test.go): pod assessment.
+  - [`requests`](../internal/requests/requests_test.go): parsing request
+    counters, turning readings into a history, and refusing what it can't
+    count, against fake and real HTTP servers.
   - [`settings`](../internal/settings/settings_test.go): mode resolution.
   - [`flagsmith`](../internal/flagsmith/client_test.go): the API client.
   - [`changes`](../internal/changes/webhook_test.go): webhook verification.
@@ -268,7 +323,7 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 
 - **Only the environment default is tracked: switching it, and changing its
   value.** A rollout through a segment override alone, such as a `% Split`
-  segment, doesn't start the pods rule, and the alert rule needs the
+  segment, doesn't start the pods or requests rules, and the alert rule needs the
   environment default to be on, so neither catches it. Values of segment
   overrides and multivariate weights aren't tracked either.
 - **Who changed a flag can be lost.** Flagsmith fills `FLAG_UPDATED` with the
@@ -284,3 +339,17 @@ These are served on `:8080/metrics`, next to controller-runtime's own metrics.
 - **Self-hosted Flagsmith without a licence allows one project and one seat
   per organisation.** So the demo uses the org API key rather than a
   least-privilege user.
+- **Request checking needs a Prometheus text counter on a port the
+  controller can reach,** over plain HTTP: no TLS, auth, protobuf or named
+  ports.
+- **The request history is in memory.** It keeps the guard's window, or
+  stableFor if longer, plus 2 minutes, and at most 2000 readings. After a
+  controller restart it starts over, so a change seen before the restart
+  isn't blamed for failing requests; the pods rule still applies.
+- **Request checking needs traffic:** `minRequests` in the minute before a
+  change and in the time after it.
+- **Only 5xx counts as failed.** A wrong page served with 200, or a change
+  that stops requests from arriving at all, isn't seen.
+- **An outage elsewhere that starts within the window can be blamed** on
+  the change. Watch mode, the minute-before check and Dismiss limit the
+  damage.

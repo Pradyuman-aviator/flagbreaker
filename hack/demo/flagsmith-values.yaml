@@ -1,4 +1,4 @@
-# Values for the official Flagsmith Helm chart, used by `make demo`.
+# Values for the official Flagsmith Helm chart, used by `bash hack/demo/up.sh`.
 # Image tags are set by hack/demo/up.sh from FLAGSMITH_VERSION in hack/lib.sh.
 
 api:
