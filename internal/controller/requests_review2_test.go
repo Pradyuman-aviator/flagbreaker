@@ -4,12 +4,17 @@ package controller
 // which incidents failing requests hold the recovery of.
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/Pradyuman-aviator/flagbreaker/api/v1alpha1"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/changes"
 	"github.com/Pradyuman-aviator/flagbreaker/internal/flagsmith"
+	"github.com/Pradyuman-aviator/flagbreaker/internal/requests"
 )
 
 func TestAnAlertIncidentStaysTrippedWhileRequestsStillFail(t *testing.T) {
@@ -75,6 +80,68 @@ func TestAnAlertIncidentStaysTrippedWhileRequestsStillFail(t *testing.T) {
 	}
 	for _, e := range g.Status.Timeline {
 		if e.Event == "Recovered" && !strings.HasPrefix(e.Message, "Verified recovery: all 2 pods ready with no new crashes for 20s, and 0 of 120 requests failed in that time.") {
+			t.Fatalf("Recovered = %q", e.Message)
+		}
+	}
+	if ev := w.fs.lastOwnEvent(t); ev.Unhealthy() {
+		t.Fatalf("want Healthy reported: %+v", ev)
+	}
+}
+
+// restart is a controller restart: the new process remembers no check,
+// webhook or request count. The guards' status is all that is left.
+func (w *world) restart(m *fakeMetrics) {
+	w.r.lastCheck = map[types.NamespacedName]time.Time{}
+	w.r.Changes = changes.NewStore()
+	w.r.Requests = requests.NewTracker(&http.Client{Transport: m})
+}
+
+func TestAPodsIncidentRightAfterARestartIsNotHeldByTheUsualFailedRequests(t *testing.T) {
+	// 8% of the requests always fail: over the 5% limit, but that is how
+	// this workload is.
+	w, m := requestsWorld(t, v1alpha1.ModeAct)
+	w.at(0)
+	for s := 5; s <= 60; s += 5 {
+		m.traffic(46, 4)
+		w.at(time.Duration(s) * time.Second)
+	}
+	w.restart(m)
+	m.traffic(46, 4)
+	w.at(65 * time.Second) // the new history starts here
+	// A second later a person switches the flag on, and 6s after that the
+	// pods crash. The minute before the switch-on isn't in the new history,
+	// so nothing shows that the requests were fine then.
+	w.fs.set(func(f *fakeFlagsmith) { f.def = true })
+	w.r.Changes.Record(envID, featureID, changes.Change{At: t0.Add(66 * time.Second), Enabled: true, ChangedBy: "admin@example.com"})
+	m.traffic(46, 4)
+	w.at(70 * time.Second)
+	w.crashPods(t0.Add(72 * time.Second))
+	m.traffic(46, 4)
+	g := w.at(75 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseTripped || g.Status.RequestsIncident || g.Status.RequestsFineBefore ||
+		g.Status.Trigger == nil || g.Status.Trigger.ChangedBy != "admin@example.com" {
+		t.Fatalf("want a pods trip blamed on admin's switch-on, with nothing known of the requests before it: %+v", g.Status)
+	}
+
+	// The new pods are up at 77s, and fail their usual 8%.
+	w.healthyPods(2, t0.Add(77*time.Second))
+	m.set(func(m *fakeMetrics) { m.pods = map[string]*requests.Count{} }) // the crashed pods are gone
+	w.giveIPs(m)
+	w.at(80 * time.Second) // the new pods: where their counting starts
+	for s := 85; s <= 95; s += 5 {
+		m.traffic(46, 4)
+		if g := w.at(time.Duration(s) * time.Second); g.Status.Phase != v1alpha1.PhaseTripped || g.Status.HealthySince == nil ||
+			!g.Status.HealthySince.Time.Equal(t0.Add(80*time.Second)) {
+			t.Fatalf("at %ds: want Tripped and healthy since 80s; the usual failures must not hold the recovery: %+v", s, g.Status)
+		}
+	}
+	m.traffic(46, 4)
+	g = w.at(100 * time.Second)
+	if g.Status.Phase != v1alpha1.PhaseRecovered {
+		t.Fatalf("want Recovered after stableFor (20s): %v", g.Status.Timeline)
+	}
+	for _, e := range g.Status.Timeline {
+		if e.Event == "Recovered" && !strings.HasPrefix(e.Message, "Verified recovery: all 2 pods ready with no new crashes for 20s, and 16 of 200 requests failed in that time.") {
 			t.Fatalf("Recovered = %q", e.Message)
 		}
 	}

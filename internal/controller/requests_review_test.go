@@ -180,8 +180,8 @@ func TestAPodsIncidentOnAWorkloadThatAlwaysFailsSomeRequestsRecovers(t *testing.
 	// 8% of the requests fail before the incident and after it: over the 5%
 	// limit, but that is how this workload is.
 	tripped, checks := podsIncident(t, 4, 4)
-	if tripped.Status.Phase != v1alpha1.PhaseTripped || tripped.Status.RequestsIncident || !tripped.Status.RequestsFailingBefore {
-		t.Fatalf("want a pods trip that notes the requests already failed before: %+v", tripped.Status)
+	if tripped.Status.Phase != v1alpha1.PhaseTripped || tripped.Status.RequestsIncident || tripped.Status.RequestsFineBefore {
+		t.Fatalf("want a pods trip that notes the requests weren't fine before: %+v", tripped.Status)
 	}
 	g := checks[40] // healthy since 20s, for stableFor
 	if g.Status.Phase != v1alpha1.PhaseRecovered {
@@ -197,8 +197,8 @@ func TestAPodsIncidentOnAWorkloadThatAlwaysFailsSomeRequestsRecovers(t *testing.
 func TestAPodsIncidentStillWaitsForRequestsThatWereFineBefore(t *testing.T) {
 	// None failed before the switch-on; after the incident, 8% do.
 	tripped, checks := podsIncident(t, 0, 4)
-	if tripped.Status.Phase != v1alpha1.PhaseTripped || tripped.Status.RequestsFailingBefore {
-		t.Fatalf("want a pods trip: %+v", tripped.Status)
+	if tripped.Status.Phase != v1alpha1.PhaseTripped || !tripped.Status.RequestsFineBefore {
+		t.Fatalf("want a pods trip that notes the requests were fine before: %+v", tripped.Status)
 	}
 	for s := 25; s <= 60; s += 5 {
 		if g := checks[s]; g.Status.Phase != v1alpha1.PhaseTripped {

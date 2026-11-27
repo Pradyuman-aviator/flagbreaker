@@ -151,12 +151,14 @@ func TestTheWhyNamesTheLimitAndWhereItCameFrom(t *testing.T) {
 	}
 }
 
-// recovering is a tripped guard whose pods have been healthy since t0+20s.
+// recovering is a tripped guard whose pods have been healthy since t0+20s,
+// after a change the requests were fine before.
 func recovering(now time.Duration, series requests.Series) Input {
 	since := t0.Add(20 * time.Second)
 	in := withRequests(tripped(t0.Add(now), ready), series)
 	in.StableFor = 20 * time.Second
 	in.HealthySince = &since
+	in.RequestsFineBefore = true
 	return in
 }
 

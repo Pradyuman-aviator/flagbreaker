@@ -375,7 +375,7 @@ func (r *FlagGuardReconciler) check(ctx context.Context, guard *v1alpha1.FlagGua
 		Alerts: alerts, AlertsSince: alertsSince(guard), HandledEventID: st.HandledEventID, Dismissed: dismissed,
 		Window: spec.Window.Duration, StableFor: spec.StableFor.Duration, FailingPods: int(spec.FailingPods),
 		FlagDisabledAt: timePtr(st.FlagDisabledAt), HealthySince: timePtr(st.HealthySince),
-		RequestsIncident: st.RequestsIncident, RequestsFailingBefore: st.RequestsFailingBefore,
+		RequestsIncident: st.RequestsIncident, AlertIncident: st.Alert != nil, RequestsFineBefore: st.RequestsFineBefore,
 	}
 	if readsRequests {
 		in.Requests = &breaker.Requests{Series: series, NotBefore: notBefore,
@@ -768,9 +768,9 @@ func (r *FlagGuardReconciler) trip(ctx context.Context, guard *v1alpha1.FlagGuar
 	// Recovery from an incident that failing requests caused waits for
 	// requests that succeed.
 	st.RequestsIncident = d.Cause == breaker.CauseRequests
-	// Requests that already failed this much before the change that crashed
-	// the pods are the workload's normal, and don't hold the recovery.
-	st.RequestsFailingBefore = d.RequestsFailingBefore
+	// Failing requests hold the recovery from an incident the pods caused
+	// only if the requests were fine before the change.
+	st.RequestsFineBefore = d.RequestsFineBefore
 	// Alerts that are active now belong to this incident; none of them may
 	// trip the guard again once it is re-armed.
 	for _, al := range alerts {
@@ -1160,7 +1160,7 @@ func (r *FlagGuardReconciler) rearm(ctx context.Context, guard *v1alpha1.FlagGua
 	}
 	// The trigger and the alert are cleared last: the Healthy report below
 	// still says what the incident was about.
-	defer func() { st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFailingBefore = nil, nil, false, false }()
+	defer func() { st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFineBefore = nil, nil, false, false }()
 	meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
 	addTimeline(st, now, "Rearmed", strings.ToUpper(d.Why[:1])+d.Why[1:])
 	// A person turned the environment default on by hand. Overrides that
@@ -1255,7 +1255,7 @@ func (r *FlagGuardReconciler) handleRestore(ctx context.Context, guard *v1alpha1
 		st.FlagEnabled = &on
 		st.Phase = v1alpha1.PhaseArmed
 		st.TrippedAt, st.FlagDisabledAt, st.FlagDisabledBy, st.HealthySince, st.RecoveredAt = nil, nil, "", nil, nil
-		st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFailingBefore = nil, nil, false, false
+		st.Trigger, st.Alert, st.RequestsIncident, st.RequestsFineBefore = nil, nil, false, false
 		meta.RemoveStatusCondition(&st.Conditions, conditionBlocked)
 		st.LastFlagChange = &v1alpha1.FlagChange{At: metav1.NewTime(now), Enabled: true, ChangedBy: ChangedByRestore, WorkloadWasFailing: failing}
 	}

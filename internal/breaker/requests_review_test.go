@@ -33,42 +33,50 @@ func TestTheMinuteBeforeAChangeStartsAtTheLastVerifiedRecovery(t *testing.T) {
 // 5% limit. For some workloads that is normal.
 func noisyBefore() requests.Series { return every5s(-60*time.Second, -5*time.Second, 25, 2) }
 
-func TestOnlyATripOnThePodsNotesRequestsThatAlreadyFailedBefore(t *testing.T) {
+func TestATripOnAChangeNotesWhetherTheRequestsWereFineBefore(t *testing.T) {
 	pods := failing(2, 0, t0.Add(4*time.Second), t0.Add(5*time.Second))
 	for name, c := range map[string]struct {
 		before requests.Series
 		want   bool
 	}{
-		"failing before": {noisyBefore(), true},
-		"fine before":    {fineBefore(), false},
-		"too few before": {every5s(-60*time.Second, -5*time.Second, 1, 1), false},
+		"fine before":    {fineBefore(), true},
+		"failing before": {noisyBefore(), false},
+		"too few before": {every5s(-60*time.Second, -5*time.Second, 1, 0), false},
+		// The history starts over after a controller restart, and when
+		// spec.requests is added.
+		"none before": {every5s(5*time.Second, 20*time.Second, 25, 2), false},
 	} {
 		d := Decide(withRequests(armed(t0.Add(20*time.Second), switchedOn(t0), pods), c.before))
-		if d.Action != Trip || d.Cause != CausePods || d.RequestsFailingBefore != c.want {
-			t.Errorf("%s: got %+v, want a pods trip with RequestsFailingBefore %v", name, d, c.want)
+		if d.Action != Trip || d.Cause != CausePods || d.RequestsFineBefore != c.want {
+			t.Errorf("%s: got %+v, want a pods trip with RequestsFineBefore %v", name, d, c.want)
 		}
 	}
-	if d := Decide(armed(t0.Add(20*time.Second), switchedOn(t0), pods)); d.Action != Trip || d.RequestsFailingBefore {
+	if d := Decide(armed(t0.Add(20*time.Second), switchedOn(t0), pods)); d.Action != Trip || d.RequestsFineBefore {
 		t.Errorf("a guard that doesn't read requests: got %+v", d)
 	}
+	// The requests rule blames a change only when the minute before was fine.
+	if d := Decide(withRequests(armed(t0.Add(6*time.Second), switchedOn(t0), ready), fineBefore(), every5s(5*time.Second, 5*time.Second, 20, 19))); d.Cause != CauseRequests || !d.RequestsFineBefore {
+		t.Errorf("a trip on requests: got %+v, want RequestsFineBefore", d)
+	}
 
-	// An alert's trip notes nothing. The minute before an alert is when the
-	// failures it reports began, not the workload's normal, so failing
-	// requests hold its recovery.
-	in := withRequests(armed(t0.Add(10*time.Second), switchedOn(t0.Add(-time.Hour)), ready), noisyBefore())
+	// An alert's trip notes nothing: the minute before an alert is when the
+	// failures it reports began, so it says nothing about the workload's
+	// normal.
+	in := withRequests(armed(t0.Add(10*time.Second), switchedOn(t0.Add(-time.Hour)), ready), fineBefore())
 	in.Alerts = []Alert{alert(41, t0)}
-	if d := Decide(in); d.Action != Trip || d.Cause != CauseAlert || d.RequestsFailingBefore {
-		t.Errorf("an alert that started at t0: got %+v, want no RequestsFailingBefore", d)
+	if d := Decide(in); d.Action != Trip || d.Cause != CauseAlert || d.RequestsFineBefore {
+		t.Errorf("an alert that started at t0: got %+v, want no RequestsFineBefore", d)
 	}
 }
 
-func TestRequestsThatFailedAsMuchBeforeTheIncidentDoNotHoldItsRecovery(t *testing.T) {
-	// 8% fail, as before the incident.
+func TestFailingRequestsHoldTheRecoveryFromThePodsOnlyIfTheyWereFineBefore(t *testing.T) {
+	// 8% fail, over the 5% limit.
 	in := recovering(45*time.Second, every5s(25*time.Second, 45*time.Second, 25, 2))
 	if d := Decide(in); d.Action != Wait || d.HealthySince != nil {
-		t.Fatalf("unless they failed as much before the incident, failing requests hold the recovery: %+v", d)
+		t.Fatalf("the requests were fine before the change, so failing ones hold the recovery: %+v", d)
 	}
-	in.RequestsFailingBefore = true
+	// As many failed before the change, or too few arrived to tell.
+	in.RequestsFineBefore = false
 	d := Decide(in)
 	if want := "all 2 pods ready with no new crashes for 25s, and 10 of 125 requests failed in that time"; d.Action != Recover || d.Why != want {
 		t.Fatalf("got %+v, want Recover with Why %q", d, want)
@@ -77,5 +85,25 @@ func TestRequestsThatFailedAsMuchBeforeTheIncidentDoNotHoldItsRecovery(t *testin
 	in.Pods = workload.Assessment{Pods: 2, Ready: 1}
 	if d := Decide(in); d.Action != Wait {
 		t.Fatalf("a pod isn't ready: %+v", d)
+	}
+}
+
+func TestFailingRequestsAlwaysHoldTheRecoveryFromAnAlertOrFailingRequests(t *testing.T) {
+	for name, cause := range map[string]func(in *Input){
+		"an alert":         func(in *Input) { in.AlertIncident = true },
+		"failing requests": func(in *Input) { in.RequestsIncident = true },
+	} {
+		// 8% fail, over the 5% limit, and nothing is known of the minute
+		// before.
+		in := recovering(45*time.Second, every5s(25*time.Second, 45*time.Second, 25, 2))
+		in.RequestsFineBefore = false
+		cause(&in)
+		if d := Decide(in); d.Action != Wait || d.HealthySince != nil {
+			t.Errorf("%s: got %+v, want Wait with HealthySince cleared", name, d)
+		}
+		in.Requests.Series = every5s(25*time.Second, 45*time.Second, 25, 0)
+		if d := Decide(in); d.Action != Recover {
+			t.Errorf("%s: the requests go through: got %+v, want Recover", name, d)
+		}
 	}
 }
