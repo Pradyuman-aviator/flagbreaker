@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +43,16 @@ const (
 	AnnotationStableFor = "flagbreaker.dev/stable-for"
 	// AnnotationRunbook is a URL added to every Feature Health event.
 	AnnotationRunbook = "flagbreaker.dev/runbook-url"
+	// AnnotationRequestsPort is spec.requests.port. It turns request reading
+	// on: Flagbreaker reads each pod's request counter on this port.
+	AnnotationRequestsPort = "flagbreaker.dev/requests-port"
+	// AnnotationRequestsPath is spec.requests.path, such as /metrics.
+	AnnotationRequestsPath = "flagbreaker.dev/requests-path"
+	// AnnotationRequestsMetric is spec.requests.metric, such as
+	// http_requests_total.
+	AnnotationRequestsMetric = "flagbreaker.dev/requests-metric"
+	// AnnotationRequestsStatusLabel is spec.requests.statusLabel, such as code.
+	AnnotationRequestsStatusLabel = "flagbreaker.dev/requests-status-label"
 
 	// LabelGenerated marks FlagGuards made from annotations.
 	LabelGenerated = "flagbreaker.dev/generated"
@@ -176,6 +187,11 @@ func (r *AnnotationReconciler) desiredGuards(obj client.Object) (map[string]*v1a
 			problems = append(problems, fmt.Sprintf("%s must be an http(s) URL", AnnotationRunbook))
 		}
 	}
+	rq, problem := requestsFromAnnotations(ann)
+	if problem != "" {
+		problems = append(problems, problem)
+	}
+	spec.Requests = rq
 
 	for _, flag := range flags {
 		name := guardName(obj.GetName(), flag)
@@ -192,6 +208,7 @@ func (r *AnnotationReconciler) desiredGuards(obj client.Object) (map[string]*v1a
 		}
 		g.Spec.Flag = flag
 		g.Spec.Links = append([]v1alpha1.Link(nil), spec.Links...)
+		g.Spec.Requests = spec.Requests.DeepCopy()
 		// A plain owner reference, without blockOwnerDeletion, needs no extra
 		// permission on the workload.
 		if err := controllerutil.SetOwnerReference(obj, g, r.Scheme()); err != nil {
@@ -201,6 +218,63 @@ func (r *AnnotationReconciler) desiredGuards(obj client.Object) (map[string]*v1a
 		out[name] = g
 	}
 	return out, strings.Join(problems, "; ")
+}
+
+var (
+	metricName = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+	labelName  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+)
+
+// requestsFromAnnotations builds spec.requests from the requests-*
+// annotations, with every field the API server would default filled in, so a
+// stored guard compares equal to it. Thresholds aren't annotations: set them
+// on a FlagGuard or in flagbreaker_policy. With an invalid value it returns
+// nil and says why, and the guard watches the pods only.
+func requestsFromAnnotations(ann map[string]string) (*v1alpha1.RequestsSpec, string) {
+	port := strings.TrimSpace(ann[AnnotationRequestsPort])
+	path := strings.TrimSpace(ann[AnnotationRequestsPath])
+	metric := strings.TrimSpace(ann[AnnotationRequestsMetric])
+	label := strings.TrimSpace(ann[AnnotationRequestsStatusLabel])
+	if port == "" {
+		if path != "" || metric != "" || label != "" {
+			return nil, fmt.Sprintf("%s, %s and %s need %s, the port to read requests on; not reading requests",
+				AnnotationRequestsPath, AnnotationRequestsMetric, AnnotationRequestsStatusLabel, AnnotationRequestsPort)
+		}
+		return nil, ""
+	}
+	rq := &v1alpha1.RequestsSpec{Path: defaultRequestsPath, Metric: defaultRequestsMetric, StatusLabel: defaultStatusLabel,
+		MaxErrorPercent: defaultMaxErrorPercent, MinRequests: defaultMinRequests}
+	var problems []string
+	if n, err := strconv.ParseInt(port, 10, 32); err == nil && n >= 1 && n <= 65535 {
+		rq.Port = int32(n)
+	} else {
+		problems = append(problems, fmt.Sprintf("%s is %q, not a port from 1 to 65535", AnnotationRequestsPort, port))
+	}
+	if path != "" {
+		if strings.HasPrefix(path, "/") && len(path) <= 200 {
+			rq.Path = path
+		} else {
+			problems = append(problems, fmt.Sprintf("%s must start with / and be at most 200 characters", AnnotationRequestsPath))
+		}
+	}
+	if metric != "" {
+		if metricName.MatchString(metric) {
+			rq.Metric = metric
+		} else {
+			problems = append(problems, fmt.Sprintf("%s is %q, not a Prometheus metric name", AnnotationRequestsMetric, metric))
+		}
+	}
+	if label != "" {
+		if labelName.MatchString(label) {
+			rq.StatusLabel = label
+		} else {
+			problems = append(problems, fmt.Sprintf("%s is %q, not a Prometheus label name", AnnotationRequestsStatusLabel, label))
+		}
+	}
+	if len(problems) > 0 {
+		return nil, strings.Join(problems, "; ") + "; not reading requests"
+	}
+	return rq, ""
 }
 
 func ownedBy(g *v1alpha1.FlagGuard, obj client.Object) bool {
@@ -222,6 +296,7 @@ func managedSpecEqual(have, want v1alpha1.FlagGuardSpec) bool {
 
 func copyManagedSpec(dst *v1alpha1.FlagGuardSpec, src v1alpha1.FlagGuardSpec) {
 	dst.Flag, dst.EnvironmentKey, dst.Workload, dst.Mode, dst.Links = src.Flag, src.EnvironmentKey, src.Workload, src.Mode, src.Links
+	dst.Requests = src.Requests.DeepCopy()
 	if src.StableFor != nil {
 		dst.StableFor = src.StableFor
 	}
