@@ -64,7 +64,7 @@ func (c Count) Percent() float64 {
 }
 
 // Sample is what all of a workload's pods counted since the previous read,
-// stamped with the time of the read.
+// stamped with the time of the read, to the second.
 type Sample struct {
 	At time.Time
 	Count
@@ -305,8 +305,9 @@ type history struct {
 }
 
 // Read reads the workload's pods and adds what they counted since the last
-// read, summed, to the guard's history, as one sample stamped now. It reads
-// at most once every MinReadInterval per guard, and keeps `keep` of history.
+// read, summed, to the guard's history, as one sample stamped now, to the
+// second. It reads at most once every MinReadInterval per guard, and keeps
+// `keep` of history.
 //
 // A pod's first reading is only where its counting starts. A reading below
 // the last one means the container restarted, so the pod counts from zero. A
@@ -362,7 +363,11 @@ func (t *Tracker) Read(ctx context.Context, guard types.NamespacedName, uid type
 		}
 	}
 	if res.Read > 0 {
-		h.series = append(h.series, Sample{At: now, Count: delta})
+		// To the second, as the guard's status keeps its times: a window that
+		// starts at a stored time, such as the change or healthySince, then
+		// leaves out the read taken just before that time, as it did before
+		// the time was stored.
+		h.series = append(h.series, Sample{At: now.Truncate(time.Second), Count: delta})
 	}
 	h.trim(now.Add(-keep))
 	res.Series = append(Series(nil), h.series...)
