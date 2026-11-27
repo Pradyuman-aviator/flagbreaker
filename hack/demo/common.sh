@@ -31,10 +31,13 @@ GOOD_CONFIG='{"tax_rate": 0.08}'
 # shellcheck disable=SC2034 # used by the scripts that source this file
 BAD_CONFIG='{"tax_rate": "8%"}'
 
-# reset_demo: new_pricing off, checkout_config good and the checkout app up,
-# whatever an earlier (perhaps failed) run left behind.
+# reset_demo: new_pricing and new_payments off, checkout_config good and the
+# checkout app up, whatever an earlier (perhaps failed) run left behind.
 reset_demo() {
   switch "$FLAGSMITH_NEW_PRICING_ID" off
+  if [[ -n "${FLAGSMITH_NEW_PAYMENTS_ID:-}" ]]; then
+    switch "$FLAGSMITH_NEW_PAYMENTS_ID" off
+  fi
   [[ -n "${FLAGSMITH_CONFIG_ID:-}" ]] && set_value "$FLAGSMITH_CONFIG_ID" "$GOOD_CONFIG"
   if ! "$KUBECTL" wait --for=condition=Available deployment/checkout -n shop --timeout=10s >/dev/null 2>&1; then
     log "the checkout app is down from an earlier run; restarting its pods"

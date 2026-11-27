@@ -3,9 +3,10 @@
 # the Flagsmith dashboard. It shows:
 #   - what Flagsmith serves: the flags, checkout_config's value, the
 #     breaker's mode and policy;
-#   - whether the shop page answers;
+#   - whether the shop page answers, and with what;
 #   - the checkout pods;
-#   - each FlagGuard's phase and its last step;
+#   - each FlagGuard's phase and its last step, and for a guard that reads
+#     requests, how many failed in the last minute;
 #   - what Feature Health says about each flag.
 #
 #   hack/demo/watch.sh      # refreshes every 2 seconds; Ctrl-C quits
@@ -56,7 +57,7 @@ flag_health() {
 }
 
 body() {
-  local cols width np ec cfg mode policy events code pods guards
+  local cols width np ec cfg pay mode policy events code pods guards
   cols="$(tput cols 2>/dev/null || echo 120)"
   width=$((cols - 8))
   ((width < 40)) && width=40
@@ -66,6 +67,10 @@ body() {
   cfg=""
   if [[ -n "${FLAGSMITH_CONFIG_ID:-}" ]]; then
     cfg="$(fs "$(flag_path "$FLAGSMITH_CONFIG_ID")" 2>/dev/null || echo '{}')"
+  fi
+  pay=""
+  if [[ -n "${FLAGSMITH_NEW_PAYMENTS_ID:-}" ]]; then
+    pay="$(fs "$(flag_path "$FLAGSMITH_NEW_PAYMENTS_ID")" 2>/dev/null || echo '{}')"
   fi
   mode="$(value_of "$(fs "$(flag_path "$FLAGSMITH_MODE_ID")" 2>/dev/null || echo '{}')")"
   policy="$(value_of "$(fs "$(flag_path "$FLAGSMITH_POLICY_ID")" 2>/dev/null || echo '{}')")"
@@ -93,13 +98,17 @@ body() {
     printf '   %-18s %s  %s  Feature Health %s\n' checkout_config "$(onoff "$(enabled_of "$cfg")")" \
       "$(paint "$BOLD" 18 "$(value_of "$cfg")")" "$(paint "$(health_colour "$h")" 9 "$h")"
   fi
+  if [[ -n "$pay" ]]; then
+    read -r h alerts <<<"$(flag_health "$events" "$FLAGSMITH_NEW_PAYMENTS_ID")"
+    printf '   %-18s %s                      Feature Health %s\n' new_payments "$(onoff "$(enabled_of "$pay")")" "$(paint "$(health_colour "$h")" 9 "$h")"
+  fi
   printf '\n'
 
-  if [[ "$code" == 200 ]]; then
-    printf ' %sSHOP%s       %s   %s● up%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$GREEN" "$OFF"
-  else
-    printf ' %sSHOP%s       %s   %s● down%s %s(no ready checkout pod answers)%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$RED" "$OFF" "$DIM" "$OFF"
-  fi
+  case "$code" in
+    200) printf ' %sSHOP%s       %s   %s● up%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$GREEN" "$OFF" ;;
+    5??) printf ' %sSHOP%s       %s   %s● error %s (the pods are up and ready, but the page fails)%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$RED" "$code" "$OFF" ;;
+    *) printf ' %sSHOP%s       %s   %s● down%s %s(no ready checkout pod answers)%s\n\n' "$BOLD" "$OFF" "$APP_URL" "$RED" "$OFF" "$DIM" "$OFF" ;;
+  esac
 
   printf ' %sPODS%s       shop/checkout\n' "$BOLD" "$OFF"
   local name state ready restarts colour
@@ -122,13 +131,22 @@ body() {
   printf '\n'
 
   printf ' %sFLAGGUARDS%s\n' "$BOLD" "$OFF"
-  local flag gmode phase last
-  while IFS=$'\t' read -r name flag gmode phase last; do
+  local flag gmode phase req last
+  # Tab is whitespace to read, so runs of tabs merge: an empty field is
+  # written as - unless it is the last one.
+  while IFS=$'\t' read -r name flag gmode phase req last; do
     [[ -n "$name" ]] || continue
     printf '   %-28s %-18s %-6s %s\n' "$name" "$flag" "$gmode" "$(paint "$(phase_colour "$phase")" 10 "$phase")"
-    [[ -n "$last" ]] && printf '     %s%s%s\n' "$DIM" "${last:0:$width}" "$OFF"
+    # Not `[[ ]] && printf`: the loop's last command must not fail under set -e.
+    if [[ -n "$last" ]]; then
+      printf '     %s%s%s\n' "$DIM" "${last:0:$width}" "$OFF"
+    fi
+    if [[ "$req" != - ]]; then
+      printf '     %s%s%s\n' "$DIM" "$req" "$OFF"
+    fi
   done < <(jq -r '.items[] | [
       .metadata.name, .spec.flag, (.status.mode // "-"), (.status.phase // "unchecked"),
+      (.status.requests | if . then "requests: \(.failed) of \(.total) failed in the last minute" + (if .errorRate then " (\(.errorRate))" else "" end) else "-" end),
       ([(.status.timeline // [])[] | select(.event != "RestoreAvailable" and .event != "HealthyNotReported")] | last
         | if . then (.time[11:19] + "  " + .message) else "" end)
     ] | @tsv' <<<"$guards")

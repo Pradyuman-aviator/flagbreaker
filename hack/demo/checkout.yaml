@@ -78,3 +78,56 @@ spec:
   links:
     - title: Runbook
       url: https://github.com/Pradyuman-aviator/flagbreaker/blob/main/docs/runbook.md
+---
+# The demo's shoppers: one pod that checks out 5 times a second, so there are
+# requests that can fail. The same image as the shop, run as `shopper`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shopper
+  namespace: shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: shopper}
+  template:
+    metadata:
+      labels: {app: shopper}
+    spec:
+      containers:
+        - name: shopper
+          image: checkout-demo:dev
+          imagePullPolicy: IfNotPresent
+          args: [shopper]
+          env:
+            - {name: SHOP_URL, value: "http://checkout.shop.svc.cluster.local/"}
+            - {name: SHOPPER_RATE, value: "5"}
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}
+---
+# new_payments breaks the shop without crashing it: payments fail with HTTP
+# 500 while every pod stays up and ready. So this guard also reads the
+# requests: Flagbreaker reads http_requests_total from each checkout pod on
+# port 8080, and trips when more than 5% of the checkouts fail with 5xx
+# after the flag changes. Written by hand, so the guards made from the
+# annotation above keep watching the pods only.
+apiVersion: flagbreaker.dev/v1alpha1
+kind: FlagGuard
+metadata:
+  name: checkout-new-payments
+  namespace: shop
+spec:
+  flag: new_payments
+  environmentKey: "__ENVIRONMENT_KEY__"
+  workload:
+    kind: Deployment
+    name: checkout
+  stableFor: 20s
+  requests:
+    port: 8080
+    metric: http_requests_total
+    maxErrorPercent: 5
+  links:
+    - title: Runbook
+      url: https://github.com/Pradyuman-aviator/flagbreaker/blob/main/docs/runbook.md

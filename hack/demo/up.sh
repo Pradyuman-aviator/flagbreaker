@@ -117,15 +117,16 @@ log "deploying the demo app and its FlagGuards"
 sed "s/__ENVIRONMENT_KEY__/$FLAGSMITH_ENVIRONMENT_KEY/g" "$DEMO_SRC/checkout.yaml" >"$DEMO_DIR/checkout.yaml"
 "$KUBECTL" apply -f "$(native_path "$DEMO_DIR/checkout.yaml")"
 "$KUBECTL" rollout status deployment/checkout -n shop --timeout 3m
-# Wait until both guards exist (one comes from the Deployment's annotation)
-# and Flagbreaker has checked each once.
+"$KUBECTL" rollout status deployment/shopper -n shop --timeout 3m
+# Wait until all four guards exist (two come from the Deployment's
+# annotation) and Flagbreaker has checked each once.
 for _ in $(seq 1 90); do
   ready="$("$KUBECTL" get flagguards -n shop -o json 2>/dev/null |
     jq '[.items[] | select((.status.phase // "") != "")] | length' 2>/dev/null || echo 0)"
-  [[ "$ready" -ge 2 ]] && break
+  [[ "$ready" -ge 4 ]] && break
   sleep 1
 done
-[[ "${ready:-0}" -ge 2 ]] || die "the FlagGuards in namespace shop were not checked within 90s; see: KUBECONFIG=.demo/kubeconfig bin/kubectl logs -n flagbreaker-system deployment/flagbreaker"
+[[ "${ready:-0}" -ge 4 ]] || die "the FlagGuards in namespace shop were not checked within 90s; see: KUBECONFIG=.demo/kubeconfig bin/kubectl logs -n flagbreaker-system deployment/flagbreaker"
 "$KUBECTL" get flagguards -n shop
 shop="$APP_URL"
 curl -fsS -o /dev/null -m 3 "$APP_URL" 2>/dev/null ||
@@ -141,6 +142,7 @@ cat <<EOF
 
   Watch it live:       bash hack/demo/watch.sh      (flags, pods, guards and Feature Health, refreshed)
   Break it:            bash hack/demo/break.sh      (switches new_pricing on, as a person would)
+  Fail payments:       bash hack/demo/break.sh new_payments (the pods stay up)
   Fire an alert:       bash hack/demo/alert.sh fire (Grafana alert for express_checkout)
   Check everything:    bash hack/demo/e2e-all.sh
   kubectl:             KUBECONFIG=.demo/kubeconfig bin/kubectl get flagguards -A
