@@ -228,8 +228,9 @@ var (
 // requestsFromAnnotations builds spec.requests from the requests-*
 // annotations, with every field the API server would default filled in, so a
 // stored guard compares equal to it. Thresholds aren't annotations: set them
-// on a FlagGuard or in flagbreaker_policy. With an invalid value it returns
-// nil and says why, and the guard watches the pods only.
+// on the FlagGuard, where they are kept, or in flagbreaker_policy. With an
+// invalid value it returns nil and says why, and the guard watches the pods
+// only.
 func requestsFromAnnotations(ann map[string]string) (*v1alpha1.RequestsSpec, string) {
 	port := strings.TrimSpace(ann[AnnotationRequestsPort])
 	path := strings.TrimSpace(ann[AnnotationRequestsPath])
@@ -296,10 +297,30 @@ func managedSpecEqual(have, want v1alpha1.FlagGuardSpec) bool {
 
 func copyManagedSpec(dst *v1alpha1.FlagGuardSpec, src v1alpha1.FlagGuardSpec) {
 	dst.Flag, dst.EnvironmentKey, dst.Workload, dst.Mode, dst.Links = src.Flag, src.EnvironmentKey, src.Workload, src.Mode, src.Links
-	dst.Requests = src.Requests.DeepCopy()
+	dst.Requests = managedRequests(dst.Requests, src.Requests)
 	if src.StableFor != nil {
 		dst.StableFor = src.StableFor
 	}
+}
+
+// managedRequests is spec.requests as the annotations ask for it. They say
+// whether to read requests and where: the port, path, metric and status
+// label. The limits aren't annotations, so a guard keeps the ones a person
+// set on it, and gets the defaults otherwise.
+func managedRequests(have, want *v1alpha1.RequestsSpec) *v1alpha1.RequestsSpec {
+	if want == nil {
+		return nil
+	}
+	rq := want.DeepCopy()
+	if have != nil {
+		if have.MaxErrorPercent > 0 {
+			rq.MaxErrorPercent = have.MaxErrorPercent
+		}
+		if have.MinRequests > 0 {
+			rq.MinRequests = have.MinRequests
+		}
+	}
+	return rq
 }
 
 func splitFlags(s string) []string {
